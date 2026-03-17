@@ -2,16 +2,26 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
 const defaultReply = "收到，你的消息已处理。"
+const (
+	defaultMCPEndpoint   = "http://localhost:8787/mcp"
+	defaultMCPTimeoutSec = 30
+	defaultHeartbeatSec  = 180
+)
 
 type Config struct {
-	App      AppConfig      `toml:"app"`
-	LongConn LongConnConfig `toml:"long_conn"`
-	Message  MessageConfig  `toml:"message"`
-	Logging  LoggingConfig  `toml:"logging"`
+	App      AppConfig                `toml:"app"`
+	LongConn LongConnConfig           `toml:"long_conn"`
+	Message  MessageConfig            `toml:"message"`
+	Logging  LoggingConfig            `toml:"logging"`
+	MCP      MCPConfig                `toml:"mcp"`
+	Commands CommandsConfig           `toml:"commands"`
+	Runtime  RuntimeConfig            `toml:"runtime"`
+	Projects map[string]ProjectConfig `toml:"projects"`
 }
 
 type AppConfig struct {
@@ -35,6 +45,24 @@ type LoggingConfig struct {
 	Level string `toml:"level"`
 }
 
+type MCPConfig struct {
+	Endpoint   string `toml:"endpoint"`
+	TimeoutSec int    `toml:"timeout_sec"`
+}
+
+type CommandsConfig struct {
+	BotOpenID    string `toml:"bot_open_id"`
+	HeartbeatSec int    `toml:"heartbeat_sec"`
+}
+
+type RuntimeConfig struct {
+	TopicStateFile string `toml:"topic_state_file"`
+}
+
+type ProjectConfig struct {
+	CWD string `toml:"cwd"`
+}
+
 func defaultConfig() Config {
 	return Config{
 		LongConn: LongConnConfig{
@@ -50,6 +78,17 @@ func defaultConfig() Config {
 		Logging: LoggingConfig{
 			Level: "info",
 		},
+		MCP: MCPConfig{
+			Endpoint:   defaultMCPEndpoint,
+			TimeoutSec: defaultMCPTimeoutSec,
+		},
+		Commands: CommandsConfig{
+			HeartbeatSec: defaultHeartbeatSec,
+		},
+		Runtime: RuntimeConfig{
+			TopicStateFile: filepath.Join(".state", "topic-state.json"),
+		},
+		Projects: map[string]ProjectConfig{},
 	}
 }
 
@@ -74,6 +113,34 @@ func (c *Config) Validate() error {
 	if c.Message.DefaultReply == "" {
 		c.Message.DefaultReply = defaultReply
 	}
+	if strings.TrimSpace(c.MCP.Endpoint) == "" {
+		c.MCP.Endpoint = defaultMCPEndpoint
+	}
+	if c.MCP.TimeoutSec <= 0 {
+		c.MCP.TimeoutSec = defaultMCPTimeoutSec
+	}
+	if c.Commands.HeartbeatSec <= 0 {
+		c.Commands.HeartbeatSec = defaultHeartbeatSec
+	}
+	if strings.TrimSpace(c.Runtime.TopicStateFile) == "" {
+		c.Runtime.TopicStateFile = filepath.Join(".state", "topic-state.json")
+	}
+	if c.Projects == nil {
+		c.Projects = map[string]ProjectConfig{}
+	}
+	normalizedProjects := make(map[string]ProjectConfig, len(c.Projects))
+	for alias, project := range c.Projects {
+		normalizedAlias := strings.ToLower(strings.TrimSpace(alias))
+		if normalizedAlias == "" {
+			return fmt.Errorf("projects alias is required")
+		}
+		project.CWD = strings.TrimSpace(project.CWD)
+		if project.CWD == "" {
+			return fmt.Errorf("projects.%s.cwd is required", normalizedAlias)
+		}
+		normalizedProjects[normalizedAlias] = project
+	}
+	c.Projects = normalizedProjects
 
 	return nil
 }

@@ -5,103 +5,88 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/D3Hunter/frieren-clone/pkg/service"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
-type fakeProcessor struct {
-	lastText string
-	out      string
+type fakeMessageService struct {
+	last service.IncomingMessage
+	err  error
 }
 
-func (f *fakeProcessor) ProcessMessage(text string) string {
-	f.lastText = text
-	if f.out != "" {
-		return f.out
-	}
-	return text
-}
-
-type fakeSender struct {
-	chatID string
-	text   string
-	err    error
-	calls  int
-}
-
-func (f *fakeSender) SendText(ctx context.Context, chatID, text string) error {
-	f.calls++
-	f.chatID = chatID
-	f.text = text
+func (f *fakeMessageService) HandleIncomingMessage(ctx context.Context, msg service.IncomingMessage) error {
+	f.last = msg
 	return f.err
 }
 
 func TestHandleEvent_IgnoresNonTextMessages(t *testing.T) {
-	processor := &fakeProcessor{}
-	sender := &fakeSender{}
-	h := NewMessageHandler(processor, sender, true)
+	svc := &fakeMessageService{}
+	h := NewMessageHandler(svc, true)
 
-	err := h.HandleEvent(context.Background(), newEvent("image", `{}`, "oc_x", "user"))
+	err := h.HandleEvent(context.Background(), newEvent("image", `{}`, "oc_x", "user", nil, ""))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if sender.calls != 0 {
-		t.Fatalf("expected sender not called, got %d", sender.calls)
+	if svc.last.ChatID != "" {
+		t.Fatalf("service should not be called, got %+v", svc.last)
 	}
 }
 
 func TestHandleEvent_IgnoresBotMessagesWhenConfigured(t *testing.T) {
-	processor := &fakeProcessor{}
-	sender := &fakeSender{}
-	h := NewMessageHandler(processor, sender, true)
+	svc := &fakeMessageService{}
+	h := NewMessageHandler(svc, true)
 
-	err := h.HandleEvent(context.Background(), newEvent("text", `{"text":"hello"}`, "oc_x", "app"))
+	err := h.HandleEvent(context.Background(), newEvent("text", `{"text":"hello"}`, "oc_x", "app", nil, ""))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if sender.calls != 0 {
-		t.Fatalf("expected sender not called, got %d", sender.calls)
+	if svc.last.ChatID != "" {
+		t.Fatalf("service should not be called, got %+v", svc.last)
 	}
 }
 
-func TestHandleEvent_SendsReplyForTextMessages(t *testing.T) {
-	processor := &fakeProcessor{out: "processed"}
-	sender := &fakeSender{}
-	h := NewMessageHandler(processor, sender, true)
+func TestHandleEvent_ParsesMentionsAndThread(t *testing.T) {
+	svc := &fakeMessageService{}
+	h := NewMessageHandler(svc, true)
 
-	err := h.HandleEvent(context.Background(), newEvent("text", `{"text":"hello"}`, "oc_x", "user"))
+	mentions := []*larkim.MentionEvent{{Id: &larkim.UserId{OpenId: strPtr("ou_bot")}}}
+	err := h.HandleEvent(context.Background(), newEvent("text", `{"text":"<at user_id=\"ou_bot\"></at> /help"}`, "oc_x", "user", mentions, "omt_topic"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if processor.lastText != "hello" {
-		t.Fatalf("expected processor text hello, got %q", processor.lastText)
+	if svc.last.ChatID != "oc_x" {
+		t.Fatalf("unexpected chat id: %q", svc.last.ChatID)
 	}
-	if sender.chatID != "oc_x" || sender.text != "processed" {
-		t.Fatalf("unexpected send args: chat=%q text=%q", sender.chatID, sender.text)
+	if svc.last.ThreadID != "omt_topic" {
+		t.Fatalf("unexpected thread id: %q", svc.last.ThreadID)
+	}
+	if len(svc.last.MentionedIDs) != 1 || svc.last.MentionedIDs[0] != "ou_bot" {
+		t.Fatalf("unexpected mentioned ids: %+v", svc.last.MentionedIDs)
 	}
 }
 
-func TestHandleEvent_PropagatesSenderError(t *testing.T) {
-	processor := &fakeProcessor{out: "processed"}
-	sender := &fakeSender{err: errors.New("boom")}
-	h := NewMessageHandler(processor, sender, true)
+func TestHandleEvent_PropagatesServiceError(t *testing.T) {
+	svc := &fakeMessageService{err: errors.New("boom")}
+	h := NewMessageHandler(svc, true)
 
-	err := h.HandleEvent(context.Background(), newEvent("text", `{"text":"hello"}`, "oc_x", "user"))
+	err := h.HandleEvent(context.Background(), newEvent("text", `{"text":"hello"}`, "oc_x", "user", nil, ""))
 	if err == nil {
-		t.Fatal("expected sender error")
+		t.Fatal("expected service error")
 	}
 }
 
-func newEvent(msgType, content, chatID, senderType string) *larkim.P2MessageReceiveV1 {
+func newEvent(msgType, content, chatID, senderType string, mentions []*larkim.MentionEvent, threadID string) *larkim.P2MessageReceiveV1 {
 	return &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{
 			Message: &larkim.EventMessage{
+				MessageId:   strPtr("om_x"),
 				MessageType: strPtr(msgType),
 				Content:     strPtr(content),
 				ChatId:      strPtr(chatID),
+				ThreadId:    strPtr(threadID),
+				Mentions:    mentions,
 			},
-			Sender: &larkim.EventSender{
-				SenderType: strPtr(senderType),
-			},
+			Sender: &larkim.EventSender{SenderType: strPtr(senderType)},
 		},
 	}
 }
