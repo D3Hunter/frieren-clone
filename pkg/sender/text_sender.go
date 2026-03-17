@@ -18,11 +18,20 @@ type messageAPI interface {
 	Reply(ctx context.Context, req *larkim.ReplyMessageReq, opts ...larkcore.RequestOptionFunc) (*larkim.ReplyMessageResp, error)
 }
 
+type messageReactionAPI interface {
+	Create(ctx context.Context, req *larkim.CreateMessageReactionReq, opts ...larkcore.RequestOptionFunc) (*larkim.CreateMessageReactionResp, error)
+}
+
 type SendRequest struct {
 	ChatID           string
 	ReplyToMessageID string
 	ThreadID         string
 	Text             string
+}
+
+type AddReactionRequest struct {
+	MessageID string
+	EmojiType string
 }
 
 type SendReceipt struct {
@@ -31,11 +40,12 @@ type SendReceipt struct {
 
 type TextSender struct {
 	api           messageAPI
+	reactionAPI   messageReactionAPI
 	maxChunkRunes int
 }
 
-func NewTextSender(api messageAPI) *TextSender {
-	return &TextSender{api: api, maxChunkRunes: defaultMaxChunkRunes}
+func NewTextSender(api messageAPI, reactionAPI messageReactionAPI) *TextSender {
+	return &TextSender{api: api, reactionAPI: reactionAPI, maxChunkRunes: defaultMaxChunkRunes}
 }
 
 func (s *TextSender) SetMaxChunkRunesForTest(max int) {
@@ -79,6 +89,40 @@ func (s *TextSender) Send(ctx context.Context, req SendRequest) (SendReceipt, er
 	}
 
 	return SendReceipt{ThreadID: lastThreadID}, nil
+}
+
+func (s *TextSender) AddReaction(ctx context.Context, req AddReactionRequest) error {
+	messageID := strings.TrimSpace(req.MessageID)
+	if messageID == "" {
+		return fmt.Errorf("message id is required")
+	}
+	emojiType := strings.TrimSpace(req.EmojiType)
+	if emojiType == "" {
+		return fmt.Errorf("emoji type is required")
+	}
+	if s.reactionAPI == nil {
+		return fmt.Errorf("message reaction api is required")
+	}
+
+	body := larkim.NewCreateMessageReactionReqBodyBuilder().
+		ReactionType(larkim.NewEmojiBuilder().EmojiType(emojiType).Build()).
+		Build()
+	createReq := larkim.NewCreateMessageReactionReqBuilder().
+		MessageId(messageID).
+		Body(body).
+		Build()
+	createReq.Body = body
+	resp, err := s.reactionAPI.Create(ctx, createReq)
+	if err != nil {
+		return fmt.Errorf("create message reaction request: %w", err)
+	}
+	if resp == nil {
+		return fmt.Errorf("create message reaction response is nil")
+	}
+	if !resp.Success() {
+		return fmt.Errorf("create message reaction failed: code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	return nil
 }
 
 func (s *TextSender) sendOne(ctx context.Context, chatID, replyToMessageID, msgType, content string) (string, error) {
@@ -137,42 +181,12 @@ func (s *TextSender) sendOne(ctx context.Context, chatID, replyToMessageID, msgT
 }
 
 func selectMsgType(text string) string {
-	trimmed := strings.TrimSpace(text)
-	if looksLikeMarkdown(trimmed) {
-		return "text"
-	}
-	if utf8.RuneCountInString(trimmed) <= 120 {
-		return "post"
-	}
+	_ = text
 	return "text"
 }
 
-func looksLikeMarkdown(text string) bool {
-	markers := []string{"```", "`", "#", "*", "|", "- ", "1.", "[", "]("}
-	for _, marker := range markers {
-		if strings.Contains(text, marker) {
-			return true
-		}
-	}
-	return false
-}
-
 func buildContent(msgType, text string) (string, error) {
-	if msgType == "post" {
-		payload := map[string]any{
-			"zh_cn": map[string]any{
-				"title": "Frieren",
-				"content": [][]map[string]string{{
-					{"tag": "text", "text": text},
-				}},
-			},
-		}
-		encoded, err := json.Marshal(payload)
-		if err != nil {
-			return "", fmt.Errorf("marshal post content: %w", err)
-		}
-		return string(encoded), nil
-	}
+	_ = msgType
 	encoded, err := json.Marshal(map[string]string{"text": text})
 	if err != nil {
 		return "", fmt.Errorf("marshal text content: %w", err)

@@ -45,12 +45,18 @@ type OutgoingMessage struct {
 	Text             string
 }
 
+type OutgoingReaction struct {
+	MessageID string
+	EmojiType string
+}
+
 type SendReceipt struct {
 	ThreadID string
 }
 
 type MessageSender interface {
 	Send(ctx context.Context, msg OutgoingMessage) (SendReceipt, error)
+	AddReaction(ctx context.Context, reaction OutgoingReaction) error
 }
 
 type IncomingMessage struct {
@@ -63,9 +69,10 @@ type IncomingMessage struct {
 }
 
 type CommandServiceConfig struct {
-	BotOpenID       string
-	Heartbeat       time.Duration
-	ProjectAliasCWD map[string]string
+	BotOpenID               string
+	Heartbeat               time.Duration
+	StartProcessingReaction string
+	ProjectAliasCWD         map[string]string
 }
 
 type CommandServiceDeps struct {
@@ -88,11 +95,10 @@ var mentionTagPattern = regexp.MustCompile(`(?s)<at\b[^>]*>.*?</at>`)
 var projectCommandPattern = regexp.MustCompile(`^/([a-zA-Z0-9_-]+)\s+(.+)$`)
 
 const (
-	processingStartMessage   = "⏳"
-	processingHeartbeatText  = "仍在处理中，请稍候…"
-	defaultHelpMessage       = "可用命令：\n/help\n/mcp tools\n/mcp schema <tool>\n/mcp call <tool> <json>\n/<project> <prompt>"
-	groupMentionHelpMessage  = "群聊里请先 @机器人 再发送斜杠命令，例如：@机器人 /help"
-	unknownProjectHelpPrefix = "未知项目别名"
+	processingStartReactionType = "OnIt"
+	defaultHelpMessage          = "可用命令：\n/help\n/mcp tools\n/mcp schema <tool>\n/mcp call <tool> <json>\n/<project> <prompt>"
+	groupMentionHelpMessage     = "群聊里请先 @机器人 再发送斜杠命令，例如：@机器人 /help"
+	unknownProjectHelpPrefix    = "未知项目别名"
 )
 
 func NewCommandService(deps CommandServiceDeps) *CommandService {
@@ -102,6 +108,10 @@ func NewCommandService(deps CommandServiceDeps) *CommandService {
 	}
 	if cfg.ProjectAliasCWD == nil {
 		cfg.ProjectAliasCWD = map[string]string{}
+	}
+	cfg.StartProcessingReaction = strings.TrimSpace(cfg.StartProcessingReaction)
+	if cfg.StartProcessingReaction == "" {
+		cfg.StartProcessingReaction = processingStartReactionType
 	}
 	normalized := make(map[string]string, len(cfg.ProjectAliasCWD))
 	for alias, cwd := range cfg.ProjectAliasCWD {
@@ -219,7 +229,7 @@ func (s *CommandService) handleSlashCommand(ctx context.Context, msg IncomingMes
 			_, err := s.send(ctx, msg, fmt.Sprintf("%s：%s", unknownProjectHelpPrefix, alias))
 			return err
 		}
-		outcome, firstReceipt, err := s.executeWithHeartbeat(ctx, msg, func(runCtx context.Context) (commandOutcome, error) {
+		outcome, err := s.executeWithHeartbeat(ctx, msg, func(runCtx context.Context) (commandOutcome, error) {
 			threadID, output, runErr := s.codex.Start(runCtx, cwd, prompt)
 			if runErr != nil {
 				return commandOutcome{}, runErr
@@ -235,7 +245,7 @@ func (s *CommandService) handleSlashCommand(ctx context.Context, msg IncomingMes
 			return err
 		}
 		if s.topicStore != nil {
-			feishuThreadID := chooseThreadID(msg.ThreadID, finalReceipt.ThreadID, firstReceipt.ThreadID)
+			feishuThreadID := chooseThreadID(msg.ThreadID, finalReceipt.ThreadID)
 			if feishuThreadID != "" && strings.TrimSpace(outcome.codexThreadID) != "" {
 				if err := s.topicStore.Upsert(TopicBinding{
 					ChatID:         msg.ChatID,
@@ -252,7 +262,7 @@ func (s *CommandService) handleSlashCommand(ctx context.Context, msg IncomingMes
 }
 
 func (s *CommandService) handleMCPTools(ctx context.Context, msg IncomingMessage) error {
-	outcome, _, err := s.executeWithHeartbeat(ctx, msg, func(runCtx context.Context) (commandOutcome, error) {
+	outcome, err := s.executeWithHeartbeat(ctx, msg, func(runCtx context.Context) (commandOutcome, error) {
 		tools, runErr := s.mcp.ListTools(runCtx)
 		if runErr != nil {
 			return commandOutcome{}, runErr
@@ -281,7 +291,7 @@ func (s *CommandService) handleMCPTools(ctx context.Context, msg IncomingMessage
 }
 
 func (s *CommandService) handleMCPSchema(ctx context.Context, msg IncomingMessage, tool string) error {
-	outcome, _, err := s.executeWithHeartbeat(ctx, msg, func(runCtx context.Context) (commandOutcome, error) {
+	outcome, err := s.executeWithHeartbeat(ctx, msg, func(runCtx context.Context) (commandOutcome, error) {
 		schema, runErr := s.mcp.GetToolSchema(runCtx, tool)
 		if runErr != nil {
 			return commandOutcome{}, runErr
@@ -297,7 +307,7 @@ func (s *CommandService) handleMCPSchema(ctx context.Context, msg IncomingMessag
 }
 
 func (s *CommandService) handleMCPCall(ctx context.Context, msg IncomingMessage, tool string, args map[string]any) error {
-	outcome, _, err := s.executeWithHeartbeat(ctx, msg, func(runCtx context.Context) (commandOutcome, error) {
+	outcome, err := s.executeWithHeartbeat(ctx, msg, func(runCtx context.Context) (commandOutcome, error) {
 		result, runErr := s.mcp.CallTool(runCtx, tool, args)
 		if runErr != nil {
 			return commandOutcome{}, runErr
@@ -319,7 +329,7 @@ func (s *CommandService) handleTopicFollowup(ctx context.Context, msg IncomingMe
 		_, err := s.send(ctx, msg, fmt.Sprintf("%s：%s", unknownProjectHelpPrefix, alias))
 		return err
 	}
-	outcome, firstReceipt, err := s.executeWithHeartbeat(ctx, msg, func(runCtx context.Context) (commandOutcome, error) {
+	outcome, err := s.executeWithHeartbeat(ctx, msg, func(runCtx context.Context) (commandOutcome, error) {
 		output, runErr := s.codex.Reply(runCtx, cwd, binding.CodexThreadID, cleanText)
 		if runErr != nil {
 			return commandOutcome{}, runErr
@@ -335,7 +345,7 @@ func (s *CommandService) handleTopicFollowup(ctx context.Context, msg IncomingMe
 		return err
 	}
 	if s.topicStore != nil {
-		feishuThreadID := chooseThreadID(msg.ThreadID, finalReceipt.ThreadID, firstReceipt.ThreadID)
+		feishuThreadID := chooseThreadID(msg.ThreadID, finalReceipt.ThreadID)
 		if feishuThreadID != "" {
 			if err := s.topicStore.Upsert(TopicBinding{
 				ChatID:         msg.ChatID,
@@ -356,15 +366,18 @@ type commandOutcome struct {
 	projectAlias  string
 }
 
-func (s *CommandService) executeWithHeartbeat(ctx context.Context, msg IncomingMessage, fn func(context.Context) (commandOutcome, error)) (commandOutcome, SendReceipt, error) {
-	firstReceipt, err := s.send(ctx, msg, processingStartMessage)
-	if err != nil {
-		return commandOutcome{}, SendReceipt{}, err
+func (s *CommandService) executeWithHeartbeat(ctx context.Context, msg IncomingMessage, fn func(context.Context) (commandOutcome, error)) (commandOutcome, error) {
+	startedAt := time.Now()
+	if s.sender != nil && strings.TrimSpace(msg.MessageID) != "" {
+		_ = s.sender.AddReaction(ctx, OutgoingReaction{
+			MessageID: msg.MessageID,
+			EmojiType: s.cfg.StartProcessingReaction,
+		})
 	}
 
 	if s.cfg.Heartbeat <= 0 {
 		outcome, runErr := fn(ctx)
-		return outcome, firstReceipt, runErr
+		return outcome, runErr
 	}
 
 	type result struct {
@@ -385,15 +398,38 @@ func (s *CommandService) executeWithHeartbeat(ctx context.Context, msg IncomingM
 	for {
 		select {
 		case <-ctx.Done():
-			return commandOutcome{}, firstReceipt, ctx.Err()
+			return commandOutcome{}, ctx.Err()
 		case res := <-resultCh:
-			return res.outcome, firstReceipt, res.err
+			return res.outcome, res.err
 		case <-ticker.C:
-			if _, heartbeatErr := s.send(ctx, msg, processingHeartbeatText); heartbeatErr != nil {
-				return commandOutcome{}, firstReceipt, heartbeatErr
+			heartbeatText := formatProcessingHeartbeat(time.Since(startedAt))
+			if _, heartbeatErr := s.send(ctx, msg, heartbeatText); heartbeatErr != nil {
+				return commandOutcome{}, heartbeatErr
 			}
 		}
 	}
+}
+
+func formatProcessingHeartbeat(elapsed time.Duration) string {
+	elapsed = elapsed.Round(time.Second)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	return fmt.Sprintf("仍在处理中（已运行 %s），请稍候…", formatElapsedDuration(elapsed))
+}
+
+func formatElapsedDuration(elapsed time.Duration) string {
+	totalSeconds := int(elapsed.Seconds())
+	if totalSeconds < 0 {
+		totalSeconds = 0
+	}
+	hours := totalSeconds / 3600
+	minutes := (totalSeconds % 3600) / 60
+	seconds := totalSeconds % 60
+	if hours > 0 {
+		return fmt.Sprintf("%d小时%02d分%02d秒", hours, minutes, seconds)
+	}
+	return fmt.Sprintf("%d分%02d秒", minutes, seconds)
 }
 
 func (s *CommandService) send(ctx context.Context, msg IncomingMessage, text string) (SendReceipt, error) {
