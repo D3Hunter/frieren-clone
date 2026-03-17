@@ -227,8 +227,7 @@ func (s *CommandService) handleSlashCommand(ctx context.Context, msg IncomingMes
 			return commandOutcome{text: output, codexThreadID: threadID, projectAlias: alias}, nil
 		})
 		if err != nil {
-			_, _ = s.send(ctx, msg, fmt.Sprintf("执行失败：%v", err))
-			return err
+			return s.replyCommandFailure(ctx, msg, "执行失败", err)
 		}
 		finalReceipt, err := s.send(ctx, msg, normalizeOutput(outcome.text))
 		if err != nil {
@@ -273,8 +272,7 @@ func (s *CommandService) handleMCPTools(ctx context.Context, msg IncomingMessage
 		return commandOutcome{text: strings.Join(lines, "\n")}, nil
 	})
 	if err != nil {
-		_, _ = s.send(ctx, msg, fmt.Sprintf("获取工具失败：%v", err))
-		return err
+		return s.replyCommandFailure(ctx, msg, "获取工具失败", err)
 	}
 	_, err = s.send(ctx, msg, normalizeOutput(outcome.text))
 	return err
@@ -289,8 +287,7 @@ func (s *CommandService) handleMCPSchema(ctx context.Context, msg IncomingMessag
 		return commandOutcome{text: fmt.Sprintf("%s 的参数 schema：\n%s", tool, schema)}, nil
 	})
 	if err != nil {
-		_, _ = s.send(ctx, msg, fmt.Sprintf("获取 schema 失败：%v", err))
-		return err
+		return s.replyCommandFailure(ctx, msg, "获取 schema 失败", err)
 	}
 	_, err = s.send(ctx, msg, normalizeOutput(outcome.text))
 	return err
@@ -305,8 +302,7 @@ func (s *CommandService) handleMCPCall(ctx context.Context, msg IncomingMessage,
 		return commandOutcome{text: result}, nil
 	})
 	if err != nil {
-		_, _ = s.send(ctx, msg, fmt.Sprintf("调用工具失败：%v", err))
-		return err
+		return s.replyCommandFailure(ctx, msg, "调用工具失败", err)
 	}
 	_, err = s.send(ctx, msg, normalizeOutput(outcome.text))
 	return err
@@ -327,8 +323,7 @@ func (s *CommandService) handleTopicFollowup(ctx context.Context, msg IncomingMe
 		return commandOutcome{text: output, codexThreadID: binding.CodexThreadID, projectAlias: alias}, nil
 	})
 	if err != nil {
-		_, _ = s.send(ctx, msg, fmt.Sprintf("执行失败：%v", err))
-		return err
+		return s.replyCommandFailure(ctx, msg, "执行失败", err)
 	}
 	finalReceipt, err := s.send(ctx, msg, normalizeOutput(outcome.text))
 	if err != nil {
@@ -407,6 +402,21 @@ func (s *CommandService) send(ctx context.Context, msg IncomingMessage, text str
 		return SendReceipt{}, err
 	}
 	return receipt, nil
+}
+
+func (s *CommandService) replyCommandFailure(ctx context.Context, msg IncomingMessage, prefix string, cause error) error {
+	text := strings.TrimSpace(prefix)
+	if text == "" {
+		text = "执行失败"
+	}
+	if cause != nil {
+		text = fmt.Sprintf("%s：%v", text, cause)
+	}
+	_, err := s.send(ctx, msg, text)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func isGroupChat(chatType string) bool {
