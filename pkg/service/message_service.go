@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -9,6 +11,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
+
+	"go.uber.org/zap"
 )
 
 type ToolInfo struct {
@@ -61,12 +66,14 @@ type MessageSender interface {
 }
 
 type IncomingMessage struct {
-	ChatID       string
-	MessageID    string
-	ThreadID     string
-	ChatType     string
-	RawText      string
-	MentionedIDs []string
+	ChatID        string
+	MessageID     string
+	ThreadID      string
+	ChatType      string
+	RawText       string
+	MentionedIDs  []string
+	RequestID     string
+	CorrelationID string
 }
 
 type CommandServiceConfig struct {
@@ -81,6 +88,7 @@ type CommandServiceDeps struct {
 	Codex      CodexGateway
 	Sender     MessageSender
 	TopicStore TopicStore
+	Logger     *zap.Logger
 	Config     CommandServiceConfig
 }
 
@@ -90,6 +98,7 @@ type CommandService struct {
 	sender     MessageSender
 	topicStore TopicStore
 	cfg        CommandServiceConfig
+	logger     *zap.Logger
 
 	mcpCodexTopicThreads map[string]string
 	mcpCodexTopicMu      sync.RWMutex
@@ -111,6 +120,10 @@ const (
 
 func NewCommandService(deps CommandServiceDeps) *CommandService {
 	cfg := deps.Config
+	logger := deps.Logger
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	if cfg.Heartbeat <= 0 {
 		cfg.Heartbeat = 3 * time.Minute
 	}
@@ -133,6 +146,7 @@ func NewCommandService(deps CommandServiceDeps) *CommandService {
 		sender:     deps.Sender,
 		topicStore: deps.TopicStore,
 		cfg:        cfg,
+		logger:     logger,
 
 		mcpCodexTopicThreads: map[string]string{},
 	}
@@ -142,6 +156,7 @@ func (s *CommandService) HandleIncomingMessage(ctx context.Context, msg Incoming
 	msg.ChatID = strings.TrimSpace(msg.ChatID)
 	msg.MessageID = strings.TrimSpace(msg.MessageID)
 	msg.ThreadID = strings.TrimSpace(msg.ThreadID)
+	msg = EnsureTraceIDs(msg)
 	if msg.ChatID == "" {
 		return fmt.Errorf("chat id is required")
 	}
@@ -150,11 +165,14 @@ func (s *CommandService) HandleIncomingMessage(ctx context.Context, msg Incoming
 	}
 
 	text := strings.TrimSpace(msg.RawText)
+	s.logger.Info("incoming feishu message", append(baseMessageLogFields(msg), zap.String("raw_text", text))...)
 	if text == "" {
+		s.logger.Info("incoming message has empty text", baseMessageLogFields(msg)...)
 		_, err := s.send(ctx, msg, "请输入命令，使用 /help 查看帮助。")
 		return err
 	}
 	cleanText := stripMentions(text)
+	s.logger.Info("parsed incoming message text", append(baseMessageLogFields(msg), zap.String("clean_text", cleanText))...)
 
 	binding, hasBinding := TopicBinding{}, false
 	if msg.ThreadID != "" && s.topicStore != nil {
@@ -163,9 +181,20 @@ func (s *CommandService) HandleIncomingMessage(ctx context.Context, msg Incoming
 			hasBinding = false
 		}
 	}
+	if hasBinding {
+		s.logger.Info(
+			"resolved topic binding",
+			append(
+				baseMessageLogFields(msg),
+				zap.String("project_alias", strings.TrimSpace(binding.ProjectAlias)),
+				zap.String("codex_thread_id", strings.TrimSpace(binding.CodexThreadID)),
+			)...,
+		)
+	}
 
 	if strings.HasPrefix(cleanText, "/") {
 		if s.requiresMention(cleanText, msg) {
+			s.logger.Info("group slash command missing bot mention", append(baseMessageLogFields(msg), zap.String("command_text", cleanText))...)
 			_, err := s.send(ctx, msg, groupMentionHelpMessage)
 			return err
 		}
@@ -176,6 +205,7 @@ func (s *CommandService) HandleIncomingMessage(ctx context.Context, msg Incoming
 		return s.handleTopicFollowup(ctx, msg, cleanText, binding)
 	}
 
+	s.logger.Info("plain text without topic binding; returning help", baseMessageLogFields(msg)...)
 	_, err := s.send(ctx, msg, "请使用 /help 查看命令格式。")
 	return err
 }
@@ -200,6 +230,7 @@ func (s *CommandService) requiresMention(cleanText string, msg IncomingMessage) 
 }
 
 func (s *CommandService) handleSlashCommand(ctx context.Context, msg IncomingMessage, cleanText string) error {
+	s.logger.Info("handling slash command", append(baseMessageLogFields(msg), zap.String("command_text", cleanText))...)
 	switch {
 	case cleanText == "/help":
 		_, err := s.send(ctx, msg, defaultHelpMessage)
@@ -221,7 +252,7 @@ func (s *CommandService) handleSlashCommand(ctx context.Context, msg IncomingMes
 		}
 		var args map[string]any
 		if err := json.Unmarshal([]byte(argsRaw), &args); err != nil {
-			_, sendErr := s.send(ctx, msg, fmt.Sprintf("JSON 解析失败：%v", err))
+			_, sendErr := s.send(ctx, msg, attachDiagnosticID(fmt.Sprintf("JSON 解析失败：%v", err), msg))
 			if sendErr != nil {
 				return sendErr
 			}
@@ -241,6 +272,14 @@ func (s *CommandService) handleSlashCommand(ctx context.Context, msg IncomingMes
 			_, err := s.send(ctx, msg, defaultHelpMessage)
 			return err
 		}
+		s.logger.Info(
+			"handling project command",
+			append(
+				baseMessageLogFields(msg),
+				zap.String("project_alias", alias),
+				zap.String("prompt", prompt),
+			)...,
+		)
 		cwd, ok := s.cfg.ProjectAliasCWD[alias]
 		if !ok || strings.TrimSpace(cwd) == "" {
 			_, err := s.send(ctx, msg, fmt.Sprintf("%s：%s", unknownProjectHelpPrefix, alias))
@@ -269,8 +308,27 @@ func (s *CommandService) handleSlashCommand(ctx context.Context, msg IncomingMes
 					ProjectAlias:   alias,
 					CodexThreadID:  outcome.codexThreadID,
 				}); err != nil {
+					s.logger.Error(
+						"persist topic binding failed",
+						append(
+							baseMessageLogFields(msg),
+							zap.String("topic_id", feishuThreadID),
+							zap.String("project_alias", alias),
+							zap.String("codex_thread_id", strings.TrimSpace(outcome.codexThreadID)),
+							zap.Error(err),
+						)...,
+					)
 					return err
 				}
+				s.logger.Info(
+					"persisted topic binding",
+					append(
+						baseMessageLogFields(msg),
+						zap.String("topic_id", feishuThreadID),
+						zap.String("project_alias", alias),
+						zap.String("codex_thread_id", strings.TrimSpace(outcome.codexThreadID)),
+					)...,
+				)
 			}
 		}
 		return nil
@@ -322,6 +380,14 @@ func (s *CommandService) handleMCPSchema(ctx context.Context, msg IncomingMessag
 
 func (s *CommandService) handleMCPCall(ctx context.Context, msg IncomingMessage, tool string, args map[string]any) error {
 	tool = strings.TrimSpace(tool)
+	s.logger.Info(
+		"handling mcp call",
+		append(
+			baseMessageLogFields(msg),
+			zap.String("tool", tool),
+			zap.Any("args", args),
+		)...,
+	)
 	if strings.EqualFold(tool, codexToolName) {
 		s.injectCodexThreadID(msg.ChatID, msg.ThreadID, args)
 	}
@@ -375,8 +441,27 @@ func (s *CommandService) handleTopicFollowup(ctx context.Context, msg IncomingMe
 				ProjectAlias:   alias,
 				CodexThreadID:  binding.CodexThreadID,
 			}); err != nil {
+				s.logger.Error(
+					"refresh topic binding failed",
+					append(
+						baseMessageLogFields(msg),
+						zap.String("topic_id", feishuThreadID),
+						zap.String("project_alias", alias),
+						zap.String("codex_thread_id", strings.TrimSpace(binding.CodexThreadID)),
+						zap.Error(err),
+					)...,
+				)
 				return err
 			}
+			s.logger.Info(
+				"refreshed topic binding",
+				append(
+					baseMessageLogFields(msg),
+					zap.String("topic_id", feishuThreadID),
+					zap.String("project_alias", alias),
+					zap.String("codex_thread_id", strings.TrimSpace(binding.CodexThreadID)),
+				)...,
+			)
 		}
 	}
 	return nil
@@ -390,15 +475,20 @@ type commandOutcome struct {
 
 func (s *CommandService) executeWithHeartbeat(ctx context.Context, msg IncomingMessage, fn func(context.Context) (commandOutcome, error)) (commandOutcome, error) {
 	startedAt := time.Now()
+	s.logger.Info("command execution started", baseMessageLogFields(msg)...)
 	if s.sender != nil && strings.TrimSpace(msg.MessageID) != "" {
-		_ = s.sender.AddReaction(ctx, OutgoingReaction{
+		err := s.sender.AddReaction(ctx, OutgoingReaction{
 			MessageID: msg.MessageID,
 			EmojiType: s.cfg.StartProcessingReaction,
 		})
+		if err != nil {
+			s.logger.Warn("failed to add start reaction", append(baseMessageLogFields(msg), zap.Error(err))...)
+		}
 	}
 
 	if s.cfg.Heartbeat <= 0 {
 		outcome, runErr := fn(ctx)
+		s.logCommandExecutionResult(msg, startedAt, outcome, runErr)
 		return outcome, runErr
 	}
 
@@ -420,12 +510,22 @@ func (s *CommandService) executeWithHeartbeat(ctx context.Context, msg IncomingM
 	for {
 		select {
 		case <-ctx.Done():
+			s.logger.Warn("command execution canceled by context", append(baseMessageLogFields(msg), zap.Duration("elapsed", time.Since(startedAt).Round(time.Second)))...)
 			return commandOutcome{}, ctx.Err()
 		case res := <-resultCh:
+			s.logCommandExecutionResult(msg, startedAt, res.outcome, res.err)
 			return res.outcome, res.err
 		case <-ticker.C:
 			heartbeatText := formatProcessingHeartbeat(time.Since(startedAt))
 			if _, heartbeatErr := s.send(ctx, msg, heartbeatText); heartbeatErr != nil {
+				s.logger.Error(
+					"send heartbeat failed",
+					append(
+						outgoingMessageLogFields(msg, heartbeatText),
+						zap.Duration("elapsed", time.Since(startedAt).Round(time.Second)),
+						zap.Error(heartbeatErr),
+					)...,
+				)
 				return commandOutcome{}, heartbeatErr
 			}
 		}
@@ -455,6 +555,7 @@ func formatElapsedDuration(elapsed time.Duration) string {
 }
 
 func (s *CommandService) send(ctx context.Context, msg IncomingMessage, text string) (SendReceipt, error) {
+	s.logger.Info("outgoing feishu response", outgoingMessageLogFields(msg, text)...)
 	receipt, err := s.sender.Send(ctx, OutgoingMessage{
 		ChatID:           msg.ChatID,
 		ReplyToMessageID: msg.MessageID,
@@ -462,8 +563,10 @@ func (s *CommandService) send(ctx context.Context, msg IncomingMessage, text str
 		Text:             text,
 	})
 	if err != nil {
+		s.logger.Error("send feishu response failed", append(outgoingMessageLogFields(msg, text), zap.Error(err))...)
 		return SendReceipt{}, err
 	}
+	s.logger.Info("feishu response sent", append(outgoingMessageLogFields(msg, text), zap.String("response_thread_id", strings.TrimSpace(receipt.ThreadID)))...)
 	return receipt, nil
 }
 
@@ -474,7 +577,11 @@ func (s *CommandService) replyCommandFailure(ctx context.Context, msg IncomingMe
 	}
 	if cause != nil {
 		text = fmt.Sprintf("%s：%v", text, cause)
+		s.logger.Error("command execution failed", append(baseMessageLogFields(msg), zap.String("failure_message", text), zap.Error(cause))...)
+	} else {
+		s.logger.Error("command execution failed", append(baseMessageLogFields(msg), zap.String("failure_message", text))...)
 	}
+	text = attachDiagnosticID(text, msg)
 	_, err := s.send(ctx, msg, text)
 	if err != nil {
 		return err
@@ -552,6 +659,13 @@ func (s *CommandService) injectCodexThreadID(chatID, feishuThreadID string, args
 	if existing == "" {
 		return
 	}
+	s.logger.Info(
+		"injecting codex thread id into mcp call args",
+		zap.String("chat_id", strings.TrimSpace(chatID)),
+		zap.String("thread_id", strings.TrimSpace(feishuThreadID)),
+		zap.String("topic_id", strings.TrimSpace(feishuThreadID)),
+		zap.String("codex_thread_id", existing),
+	)
 	args["threadId"] = existing
 }
 
@@ -600,12 +714,31 @@ func (s *CommandService) recordCodexThreadID(msg IncomingMessage, finalReceipt S
 	if ok && strings.TrimSpace(binding.ProjectAlias) != "" {
 		projectAlias = strings.TrimSpace(binding.ProjectAlias)
 	}
-	_ = s.topicStore.Upsert(TopicBinding{
+	if err := s.topicStore.Upsert(TopicBinding{
 		ChatID:         chatID,
 		FeishuThreadID: feishuThreadID,
 		ProjectAlias:   projectAlias,
 		CodexThreadID:  codexThreadID,
-	})
+	}); err != nil {
+		s.logger.Warn(
+			"persist mcp codex topic binding failed",
+			zap.String("chat_id", chatID),
+			zap.String("thread_id", feishuThreadID),
+			zap.String("topic_id", feishuThreadID),
+			zap.String("project_alias", projectAlias),
+			zap.String("codex_thread_id", codexThreadID),
+			zap.Error(err),
+		)
+		return
+	}
+	s.logger.Info(
+		"persisted mcp codex topic binding",
+		zap.String("chat_id", chatID),
+		zap.String("thread_id", feishuThreadID),
+		zap.String("topic_id", feishuThreadID),
+		zap.String("project_alias", projectAlias),
+		zap.String("codex_thread_id", codexThreadID),
+	)
 }
 
 func parseCodexThreadID(output string) string {
@@ -640,4 +773,113 @@ func (s *CommandService) bindingSupportsProjectFollowup(binding TopicBinding) bo
 	}
 	cwd := strings.TrimSpace(s.cfg.ProjectAliasCWD[alias])
 	return cwd != ""
+}
+
+func baseMessageLogFields(msg IncomingMessage) []zap.Field {
+	mentionedIDs := make([]string, 0, len(msg.MentionedIDs))
+	for _, id := range msg.MentionedIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		mentionedIDs = append(mentionedIDs, id)
+	}
+	sort.Strings(mentionedIDs)
+
+	threadID := strings.TrimSpace(msg.ThreadID)
+	return []zap.Field{
+		zap.String("chat_id", strings.TrimSpace(msg.ChatID)),
+		zap.String("chat_type", strings.TrimSpace(msg.ChatType)),
+		zap.String("message_id", strings.TrimSpace(msg.MessageID)),
+		zap.String("thread_id", threadID),
+		zap.String("topic_id", threadID),
+		zap.String("request_id", strings.TrimSpace(msg.RequestID)),
+		zap.String("correlation_id", strings.TrimSpace(msg.CorrelationID)),
+		zap.Strings("mentioned_ids", mentionedIDs),
+	}
+}
+
+func outgoingMessageLogFields(msg IncomingMessage, text string) []zap.Field {
+	fields := make([]zap.Field, 0, 9)
+	fields = append(fields, baseMessageLogFields(msg)...)
+	fields = append(
+		fields,
+		zap.String("reply_to_message_id", strings.TrimSpace(msg.MessageID)),
+		zap.String("text", strings.TrimSpace(text)),
+		zap.Int("text_runes", utf8.RuneCountInString(strings.TrimSpace(text))),
+	)
+	return fields
+}
+
+func (s *CommandService) logCommandExecutionResult(msg IncomingMessage, startedAt time.Time, outcome commandOutcome, err error) {
+	fields := make([]zap.Field, 0, 12)
+	fields = append(fields, baseMessageLogFields(msg)...)
+	fields = append(fields, zap.Duration("elapsed", time.Since(startedAt).Round(time.Second)))
+	if strings.TrimSpace(outcome.projectAlias) != "" {
+		fields = append(fields, zap.String("project_alias", strings.TrimSpace(outcome.projectAlias)))
+	}
+	if strings.TrimSpace(outcome.codexThreadID) != "" {
+		fields = append(fields, zap.String("codex_thread_id", strings.TrimSpace(outcome.codexThreadID)))
+	}
+	if err != nil {
+		s.logger.Error("command execution finished with error", append(fields, zap.Error(err))...)
+		return
+	}
+	s.logger.Info("command execution finished", fields...)
+}
+
+func EnsureTraceIDs(msg IncomingMessage) IncomingMessage {
+	msg.RequestID = normalizeRequestID(msg.RequestID, msg.MessageID)
+	msg.CorrelationID = normalizeCorrelationID(msg.CorrelationID, msg.ChatID, msg.ThreadID, msg.MessageID, msg.RequestID)
+	return msg
+}
+
+func normalizeRequestID(existing, messageID string) string {
+	existing = strings.TrimSpace(existing)
+	if existing != "" {
+		return existing
+	}
+	messageID = strings.TrimSpace(messageID)
+	if messageID != "" {
+		return "req_" + messageID
+	}
+	return "req_" + randomIDSuffix()
+}
+
+func normalizeCorrelationID(existing, chatID, threadID, messageID, requestID string) string {
+	existing = strings.TrimSpace(existing)
+	if existing != "" {
+		return existing
+	}
+	chatID = strings.TrimSpace(chatID)
+	threadID = strings.TrimSpace(threadID)
+	messageID = strings.TrimSpace(messageID)
+	requestID = strings.TrimSpace(requestID)
+	if chatID != "" && threadID != "" {
+		return "corr_" + chatID + "_" + threadID
+	}
+	if chatID != "" && messageID != "" {
+		return "corr_" + chatID + "_" + messageID
+	}
+	if requestID != "" {
+		return "corr_" + requestID
+	}
+	return "corr_" + randomIDSuffix()
+}
+
+func randomIDSuffix() string {
+	buf := make([]byte, 8)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(buf)
+}
+
+func attachDiagnosticID(text string, msg IncomingMessage) string {
+	text = strings.TrimSpace(text)
+	requestID := strings.TrimSpace(msg.RequestID)
+	if requestID == "" {
+		return text
+	}
+	return fmt.Sprintf("%s\n诊断ID：%s", text, requestID)
 }
