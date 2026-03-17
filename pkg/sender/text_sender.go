@@ -14,14 +14,18 @@ import (
 const defaultMaxChunkRunes = 1800
 
 type messageAPI interface {
+	// Create sends a new chat message using Feishu's create-message API.
 	Create(ctx context.Context, req *larkim.CreateMessageReq, opts ...larkcore.RequestOptionFunc) (*larkim.CreateMessageResp, error)
+	// Reply sends a reply message attached to an existing Feishu message thread.
 	Reply(ctx context.Context, req *larkim.ReplyMessageReq, opts ...larkcore.RequestOptionFunc) (*larkim.ReplyMessageResp, error)
 }
 
 type messageReactionAPI interface {
+	// Create creates one emoji reaction on a target Feishu message.
 	Create(ctx context.Context, req *larkim.CreateMessageReactionReq, opts ...larkcore.RequestOptionFunc) (*larkim.CreateMessageReactionResp, error)
 }
 
+// SendRequest describes one outgoing reply workflow request.
 type SendRequest struct {
 	ChatID           string
 	ReplyToMessageID string
@@ -29,31 +33,37 @@ type SendRequest struct {
 	Text             string
 }
 
+// AddReactionRequest describes one emoji reaction request on an existing message.
 type AddReactionRequest struct {
 	MessageID string
 	EmojiType string
 }
 
+// SendReceipt reports response metadata from Send.
 type SendReceipt struct {
 	ThreadID string
 }
 
+// TextSender sends Feishu text replies and reactions with chunking and thread support.
 type TextSender struct {
 	api           messageAPI
 	reactionAPI   messageReactionAPI
 	maxChunkRunes int
 }
 
+// NewTextSender builds a TextSender with default chunk size and API dependencies.
 func NewTextSender(api messageAPI, reactionAPI messageReactionAPI) *TextSender {
 	return &TextSender{api: api, reactionAPI: reactionAPI, maxChunkRunes: defaultMaxChunkRunes}
 }
 
+// SetMaxChunkRunesForTest overrides chunk size in tests to force multi-chunk behavior.
 func (s *TextSender) SetMaxChunkRunesForTest(max int) {
 	if max > 0 {
 		s.maxChunkRunes = max
 	}
 }
 
+// Send validates input, splits long text, and sends each chunk as a Feishu reply in order.
 func (s *TextSender) Send(ctx context.Context, req SendRequest) (SendReceipt, error) {
 	chatID := strings.TrimSpace(req.ChatID)
 	if chatID == "" {
@@ -91,6 +101,7 @@ func (s *TextSender) Send(ctx context.Context, req SendRequest) (SendReceipt, er
 	return SendReceipt{ThreadID: lastThreadID}, nil
 }
 
+// AddReaction adds an emoji reaction to an existing Feishu message.
 func (s *TextSender) AddReaction(ctx context.Context, req AddReactionRequest) error {
 	messageID := strings.TrimSpace(req.MessageID)
 	if messageID == "" {

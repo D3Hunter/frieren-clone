@@ -10,20 +10,24 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// ToolInfo is a simplified MCP tool descriptor exposed to the service layer.
 type ToolInfo struct {
 	Name        string
 	Description string
 }
 
+// Gateway wraps short-lived MCP client sessions for list/schema/call operations.
 type Gateway struct {
 	endpoint string
 	timeout  time.Duration
 }
 
+// NewGateway builds a Gateway for the given streamable MCP endpoint and call timeout.
 func NewGateway(endpoint string, timeout time.Duration) *Gateway {
 	return &Gateway{endpoint: strings.TrimSpace(endpoint), timeout: timeout}
 }
 
+// ListTools lists all MCP tools by paging through the server cursor until completion.
 func (g *Gateway) ListTools(ctx context.Context) ([]ToolInfo, error) {
 	tools, err := g.fetchTools(ctx)
 	if err != nil {
@@ -36,6 +40,7 @@ func (g *Gateway) ListTools(ctx context.Context) ([]ToolInfo, error) {
 	return result, nil
 }
 
+// GetToolSchema returns the formatted JSON input schema for a named MCP tool.
 func (g *Gateway) GetToolSchema(ctx context.Context, tool string) (string, error) {
 	tool = strings.TrimSpace(tool)
 	if tool == "" {
@@ -58,6 +63,7 @@ func (g *Gateway) GetToolSchema(ctx context.Context, tool string) (string, error
 	return "", fmt.Errorf("tool %q not found", tool)
 }
 
+// CallTool executes a named MCP tool with JSON arguments and renders textual output.
 func (g *Gateway) CallTool(ctx context.Context, tool string, args map[string]any) (string, error) {
 	tool = strings.TrimSpace(tool)
 	if tool == "" {

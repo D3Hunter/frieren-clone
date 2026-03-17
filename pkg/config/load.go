@@ -7,6 +7,7 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+// Load reads a TOML file from disk, decodes it, and returns a validated Config.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -21,6 +22,7 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
+// LoadFromBytes decodes TOML bytes into Config, applies defaults, and validates required fields.
 func LoadFromBytes(data []byte) (*Config, error) {
 	cfg := defaultConfig()
 	if err := toml.Unmarshal(data, &cfg); err != nil {

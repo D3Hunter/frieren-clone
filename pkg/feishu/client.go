@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 )
 
+// ToLogLevel converts text log-level config values into larksuite SDK log levels.
 func ToLogLevel(level string) larkcore.LogLevel {
 	switch strings.ToLower(strings.TrimSpace(level)) {
 	case "debug":
@@ -26,6 +27,7 @@ func ToLogLevel(level string) larkcore.LogLevel {
 	}
 }
 
+// NewAppClient builds an authenticated Feishu OpenAPI client with optional zap-backed SDK logging.
 func NewAppClient(cfg config.Config, logger *zap.Logger) *lark.Client {
 	level := ToLogLevel(cfg.Logging.Level)
 	options := []lark.ClientOptionFunc{
@@ -41,6 +43,7 @@ func NewAppClient(cfg config.Config, logger *zap.Logger) *lark.Client {
 	)
 }
 
+// NewWSClient builds a Feishu websocket client that dispatches message events to messageHandler.
 func NewWSClient(cfg config.Config, messageHandler func(context.Context, *larkim.P2MessageReceiveV1) error, logger *zap.Logger) *larkws.Client {
 	dispatcher := larkevent.NewEventDispatcher("", "").
 		OnP2MessageReceiveV1(messageHandler)

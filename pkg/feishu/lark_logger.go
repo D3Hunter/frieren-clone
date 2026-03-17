@@ -29,18 +29,22 @@ func newLarkZapLogger(logger *zap.Logger, appSecret string) larkcore.Logger {
 	}
 }
 
+// Debug emits a redacted debug-level SDK log message through zap.
 func (l *larkZapLogger) Debug(ctx context.Context, args ...interface{}) {
 	l.log(ctx, l.logger.Debug, args...)
 }
 
+// Info emits a redacted info-level SDK log message through zap.
 func (l *larkZapLogger) Info(ctx context.Context, args ...interface{}) {
 	l.log(ctx, l.logger.Info, args...)
 }
 
+// Warn emits a redacted warn-level SDK log message through zap.
 func (l *larkZapLogger) Warn(ctx context.Context, args ...interface{}) {
 	l.log(ctx, l.logger.Warn, args...)
 }
 
+// Error emits a redacted error-level SDK log message through zap.
 func (l *larkZapLogger) Error(ctx context.Context, args ...interface{}) {
 	l.log(ctx, l.logger.Error, args...)
 }

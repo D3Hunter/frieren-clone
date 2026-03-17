@@ -11,6 +11,21 @@ state persistence, and runtime defaults.
 When writing complex features or significant refactors, use an ExecPlan
 as described in `PLANS.md` from design to implementation.
 
+# Logging Style
+
+- Use `logger.With(...)` only for context fields that are shared across multiple log lines, and reuse that derived logger.
+- For one-off fields, pass them directly on the log call (for example `logger.Info("...", zap.Int("x", x))`) instead of creating a one-time `.With(...)`.
+- Keep per-line fields focused on event-specific details (for example `err`, `elapsed`, `tool`, `text`) to improve readability.
+- Prefer this pattern in handler/service flows that carry repeated message metadata (`chat_id`, `message_id`, `thread_id`, `request_id`, `correlation_id`).
+
+# Go Doc Comments
+
+- All top-level exported objects (types, funcs, methods, consts, vars) must have doc comments.
+- Each comment must start with the target name (for example `Config ...`, `HandleEvent ...`, `FormatJSON ...`).
+- Every interface method declaration must also have a comment line, and the comment must start with that method name.
+- Comments should explain what the target does and, when useful, how it does it.
+- Keep comment length proportional to complexity: simple wrappers can use one sentence; workflow-heavy logic should use richer context.
+
 # PR Workflow
 
 - Do not use a `[codex]` prefix in PR titles.
