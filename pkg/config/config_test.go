@@ -14,6 +14,7 @@ secret='sec'
 [commands]
 bot_open_id='ou_bot'
 heartbeat_sec=120
+start_reaction='Typing'
 
 [runtime]
 topic_state_file='./tmp/topic-state.json'
@@ -35,6 +36,9 @@ cwd='/Users/me/play'
 	}
 	if cfg.Commands.HeartbeatSec != 120 {
 		t.Fatalf("unexpected heartbeat: %d", cfg.Commands.HeartbeatSec)
+	}
+	if cfg.Commands.StartReaction != "Typing" {
+		t.Fatalf("unexpected start reaction: %q", cfg.Commands.StartReaction)
 	}
 	if cfg.Runtime.TopicStateFile != "./tmp/topic-state.json" {
 		t.Fatalf("unexpected topic state file: %q", cfg.Runtime.TopicStateFile)
@@ -61,6 +65,9 @@ func TestLoadFromBytes_AppliesMCPAndCommandDefaults(t *testing.T) {
 	}
 	if cfg.Commands.HeartbeatSec <= 0 {
 		t.Fatalf("expected positive heartbeat, got %d", cfg.Commands.HeartbeatSec)
+	}
+	if cfg.Commands.StartReaction == "" {
+		t.Fatal("expected start_reaction default")
 	}
 	if cfg.Runtime.TopicStateFile == "" {
 		t.Fatal("expected topic_state_file default")

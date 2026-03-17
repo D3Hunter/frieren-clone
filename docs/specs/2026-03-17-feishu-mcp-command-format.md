@@ -10,7 +10,7 @@ Convert the bot from simple echo/default-reply mode into a command-driven workfl
 - supports MCP tool interaction via local streamable HTTP endpoint (`http://localhost:8787/mcp` by default),
 - supports project-scoped Codex execution through `/<project> <prompt>`,
 - persists Feishu topic to Codex thread bindings so follow-up replies in the same topic continue the same Codex thread,
-- provides user-visible progress feedback (immediate hourglass + periodic heartbeat),
+- provides user-visible progress feedback (immediate `OnIt` reaction + periodic heartbeat),
 - keeps replies in the same topic chain and handles long outputs robustly.
 
 ## 2) Canonical command surface
@@ -65,14 +65,14 @@ Plain text outside bound topic context does not use legacy echo behavior; it ret
 
 2. `pkg/service/message_service.go`
    - parses command/follow-up intent,
-   - sends immediate `⏳`,
+   - adds immediate `OnIt` reaction on the user message,
    - runs command with heartbeat ticker,
    - sends final response,
    - persists topic binding when project-thread is known.
 
 3. `pkg/sender/text_sender.go`
    - replies to incoming message via Feishu reply API (`reply_in_thread=true`),
-   - chooses message type (`post` or `text`),
+   - uses `text` message type to avoid extra post title formatting,
    - chunks long outputs and prefixes ordering markers.
 
 4. `pkg/runtime/topic_state_store.go`
@@ -99,6 +99,7 @@ timeout_sec = 30
 [commands]
 bot_open_id = "ou_bot_open_id"
 heartbeat_sec = 180
+start_reaction = "OnIt"
 
 [runtime]
 topic_state_file = ".state/topic-state.json"
@@ -112,6 +113,7 @@ Defaults/validation:
 - `mcp.endpoint` default: `http://localhost:8787/mcp`
 - `mcp.timeout_sec` default: `30`
 - `commands.heartbeat_sec` default: `180`
+- `commands.start_reaction` default: `OnIt`
 - `runtime.topic_state_file` default: `.state/topic-state.json`
 - `projects.<alias>.cwd` required when alias exists
 - project aliases are normalized to lowercase
@@ -197,14 +199,13 @@ Implemented in `pkg/sender/text_sender.go` and service heartbeat flow.
 - All service responses are sent as replies to incoming message id.
 - Reply API uses `reply_in_thread=true` to keep same topic chain behavior.
 - Content mode selection:
-  - prefer `text` when markdown/code markers are present,
-  - use `post` for short plain text responses (<= 120 runes).
+  - always uses `text` to avoid extra post title rendering (for example bold `Frieren` title).
 - Long output splitting:
   - chunk at 1800 runes,
   - each chunk prefixed with `[i/n]`.
 - Processing feedback:
-  - send immediate `⏳`,
-  - send `仍在处理中，请稍候…` every configured heartbeat interval until completion.
+  - add immediate `OnIt` reaction on incoming user message,
+  - send `仍在处理中（已运行 X分YY秒），请稍候…` every configured heartbeat interval (default 180 seconds) until completion.
 
 ## 10) Verification and test coverage
 

@@ -11,6 +11,7 @@ const (
 	defaultMCPEndpoint   = "http://localhost:8787/mcp"
 	defaultMCPTimeoutSec = 30
 	defaultHeartbeatSec  = 180
+	defaultStartReaction = "OnIt"
 )
 
 type Config struct {
@@ -51,8 +52,9 @@ type MCPConfig struct {
 }
 
 type CommandsConfig struct {
-	BotOpenID    string `toml:"bot_open_id"`
-	HeartbeatSec int    `toml:"heartbeat_sec"`
+	BotOpenID     string `toml:"bot_open_id"`
+	HeartbeatSec  int    `toml:"heartbeat_sec"`
+	StartReaction string `toml:"start_reaction"`
 }
 
 type RuntimeConfig struct {
@@ -83,7 +85,8 @@ func defaultConfig() Config {
 			TimeoutSec: defaultMCPTimeoutSec,
 		},
 		Commands: CommandsConfig{
-			HeartbeatSec: defaultHeartbeatSec,
+			HeartbeatSec:  defaultHeartbeatSec,
+			StartReaction: defaultStartReaction,
 		},
 		Runtime: RuntimeConfig{
 			TopicStateFile: filepath.Join(".state", "topic-state.json"),
@@ -121,6 +124,10 @@ func (c *Config) Validate() error {
 	}
 	if c.Commands.HeartbeatSec <= 0 {
 		c.Commands.HeartbeatSec = defaultHeartbeatSec
+	}
+	c.Commands.StartReaction = strings.TrimSpace(c.Commands.StartReaction)
+	if c.Commands.StartReaction == "" {
+		c.Commands.StartReaction = defaultStartReaction
 	}
 	if strings.TrimSpace(c.Runtime.TopicStateFile) == "" {
 		c.Runtime.TopicStateFile = filepath.Join(".state", "topic-state.json")

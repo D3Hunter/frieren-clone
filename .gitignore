@@ -29,8 +29,8 @@ go.work.sum
 prod.toml
 
 # Editor/IDE
-# .idea/
-# .vscode/
+.idea/
+.vscode/
 
 # Local git worktrees
 .worktrees/

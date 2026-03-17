@@ -61,6 +61,13 @@ func (a messageSenderAdapter) Send(ctx context.Context, msg service.OutgoingMess
 	return service.SendReceipt{ThreadID: receipt.ThreadID}, nil
 }
 
+func (a messageSenderAdapter) AddReaction(ctx context.Context, reaction service.OutgoingReaction) error {
+	return a.sender.AddReaction(ctx, sender.AddReactionRequest{
+		MessageID: reaction.MessageID,
+		EmojiType: reaction.EmojiType,
+	})
+}
+
 func (a topicStoreAdapter) Get(chatID, feishuThreadID string) (service.TopicBinding, bool) {
 	state, ok := a.store.Get(chatID, feishuThreadID)
 	if !ok {
@@ -93,7 +100,7 @@ func main() {
 	}
 
 	appClient := feishu.NewAppClient(*cfg)
-	textSender := sender.NewTextSender(appClient.Im.V1.Message)
+	textSender := sender.NewTextSender(appClient.Im.V1.Message, appClient.Im.V1.MessageReaction)
 	topicStore, err := runtime.NewTopicStateStore(cfg.Runtime.TopicStateFile)
 	if err != nil {
 		log.Fatalf("init topic state store: %v", err)
@@ -108,9 +115,10 @@ func main() {
 		Sender:     messageSenderAdapter{sender: textSender},
 		TopicStore: topicStoreAdapter{store: topicStore},
 		Config: service.CommandServiceConfig{
-			BotOpenID:       cfg.Commands.BotOpenID,
-			Heartbeat:       time.Duration(cfg.Commands.HeartbeatSec) * time.Second,
-			ProjectAliasCWD: projectAliasCWD,
+			BotOpenID:               cfg.Commands.BotOpenID,
+			Heartbeat:               time.Duration(cfg.Commands.HeartbeatSec) * time.Second,
+			StartProcessingReaction: cfg.Commands.StartReaction,
+			ProjectAliasCWD:         projectAliasCWD,
 		},
 	})
 	messageHandler := handler.NewMessageHandler(commandService, cfg.Message.IgnoreBotMessages)
