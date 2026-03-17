@@ -1,0 +1,16 @@
+[app]
+id = "cli_xxxxxxxxxxxxx"
+secret = "your_app_secret"
+
+[long_conn]
+log_level = "info"
+auto_reconnect = true
+reconnect_backoff_sec = 3
+
+[message]
+default_reply = "收到，你的消息已处理。"
+echo_mode = true
+ignore_bot_messages = true
+
+[logging]
+level = "info"
