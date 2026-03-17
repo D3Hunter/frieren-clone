@@ -346,6 +346,43 @@ func TestHandleIncomingMessage_MCPCallInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestHandleIncomingMessage_MCPCallToolErrorIsHandledWithoutPropagation(t *testing.T) {
+	sender := &fakeMessageSender{}
+	svc := NewCommandService(CommandServiceDeps{
+		MCP: &fakeMCPGateway{
+			callErr: errors.New(`tool "codex" returned error: Failed to parse configuration for Codex tool: missing field "prompt"`),
+		},
+		Codex:      &fakeCodexGateway{},
+		Sender:     sender,
+		TopicStore: newFakeTopicStore(),
+		Config:     CommandServiceConfig{BotOpenID: "ou_bot", Heartbeat: time.Hour},
+	})
+
+	err := svc.HandleIncomingMessage(context.Background(), IncomingMessage{
+		ChatID:       "oc_chat",
+		ChatType:     "group",
+		MessageID:    "om_1",
+		RawText:      `<at user_id="ou_bot"></at> /mcp call codex {"topic":"x"}`,
+		MentionedIDs: []string{"ou_bot"},
+	})
+	if err != nil {
+		t.Fatalf("HandleIncomingMessage error: %v", err)
+	}
+
+	if len(sender.messages) != 1 {
+		t.Fatalf("expected one failure message, got %d", len(sender.messages))
+	}
+	if len(sender.reactions) != 1 {
+		t.Fatalf("expected one processing reaction, got %d", len(sender.reactions))
+	}
+	if sender.reactions[0].EmojiType != "OnIt" {
+		t.Fatalf("expected OnIt reaction, got %q", sender.reactions[0].EmojiType)
+	}
+	if !strings.Contains(sender.messages[0].Text, "调用工具失败") {
+		t.Fatalf("expected tool failure message, got %q", sender.messages[0].Text)
+	}
+}
+
 func TestHandleIncomingMessage_HeartbeatWhileProcessing(t *testing.T) {
 	sender := &fakeMessageSender{}
 	codex := &fakeCodexGateway{startThreadID: "codex_t", startOutput: "ok", delay: 80 * time.Millisecond}
@@ -396,6 +433,44 @@ func TestHandleIncomingMessage_HeartbeatWhileProcessing(t *testing.T) {
 	}
 }
 
+func TestHandleIncomingMessage_DependencyErrorsReplyToUserWithoutPropagation(t *testing.T) {
+	sender := &fakeMessageSender{}
+	svc := NewCommandService(CommandServiceDeps{
+		MCP:        &fakeMCPGateway{},
+		Codex:      &fakeCodexGateway{err: errors.New("boom")},
+		Sender:     sender,
+		TopicStore: newFakeTopicStore(),
+		Config: CommandServiceConfig{
+			BotOpenID:       "ou_bot",
+			Heartbeat:       time.Hour,
+			ProjectAliasCWD: map[string]string{"tidb": "/work/tidb"},
+		},
+	})
+
+	err := svc.HandleIncomingMessage(context.Background(), IncomingMessage{
+		ChatID:       "oc_chat",
+		ChatType:     "group",
+		MessageID:    "om_1",
+		RawText:      "<at user_id=\"ou_bot\"></at> /tidb 测试失败",
+		MentionedIDs: []string{"ou_bot"},
+	})
+	if err != nil {
+		t.Fatalf("HandleIncomingMessage error: %v", err)
+	}
+	if len(sender.messages) != 1 {
+		t.Fatalf("expected one failure message, got %d", len(sender.messages))
+	}
+	if len(sender.reactions) != 1 {
+		t.Fatalf("expected one processing reaction, got %d", len(sender.reactions))
+	}
+	if sender.reactions[0].EmojiType != "OnIt" {
+		t.Fatalf("expected OnIt reaction, got %q", sender.reactions[0].EmojiType)
+	}
+	if !strings.Contains(sender.messages[0].Text, "执行失败") {
+		t.Fatalf("expected execution failure message, got %q", sender.messages[0].Text)
+	}
+}
+
 func TestHandleIncomingMessage_UsesConfiguredStartReaction(t *testing.T) {
 	sender := &fakeMessageSender{}
 	codex := &fakeCodexGateway{startThreadID: "codex_t", startOutput: "ok"}
@@ -427,30 +502,5 @@ func TestHandleIncomingMessage_UsesConfiguredStartReaction(t *testing.T) {
 	}
 	if sender.reactions[0].EmojiType != "Typing" {
 		t.Fatalf("expected Typing reaction, got %q", sender.reactions[0].EmojiType)
-	}
-}
-
-func TestHandleIncomingMessage_PropagatesDependencyErrors(t *testing.T) {
-	svc := NewCommandService(CommandServiceDeps{
-		MCP:        &fakeMCPGateway{},
-		Codex:      &fakeCodexGateway{err: errors.New("boom")},
-		Sender:     &fakeMessageSender{},
-		TopicStore: newFakeTopicStore(),
-		Config: CommandServiceConfig{
-			BotOpenID:       "ou_bot",
-			Heartbeat:       time.Hour,
-			ProjectAliasCWD: map[string]string{"tidb": "/work/tidb"},
-		},
-	})
-
-	err := svc.HandleIncomingMessage(context.Background(), IncomingMessage{
-		ChatID:       "oc_chat",
-		ChatType:     "group",
-		MessageID:    "om_1",
-		RawText:      "<at user_id=\"ou_bot\"></at> /tidb 测试失败",
-		MentionedIDs: []string{"ou_bot"},
-	})
-	if err == nil {
-		t.Fatal("expected error")
 	}
 }
