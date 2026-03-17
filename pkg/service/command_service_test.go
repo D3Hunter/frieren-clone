@@ -323,6 +323,39 @@ func TestHandleIncomingMessage_HelpCommand(t *testing.T) {
 	}
 }
 
+func TestHandleIncomingMessage_HelpCommandMentionsMCPCallCodexStartsNewThread(t *testing.T) {
+	sender := &fakeMessageSender{}
+	svc := NewCommandService(CommandServiceDeps{
+		MCP:        &fakeMCPGateway{},
+		Codex:      &fakeCodexGateway{},
+		Sender:     sender,
+		TopicStore: newFakeTopicStore(),
+		Config: CommandServiceConfig{
+			BotOpenID:       "ou_bot",
+			Heartbeat:       time.Hour,
+			ProjectAliasCWD: map[string]string{"tidb": "/tmp/tidb"},
+		},
+	})
+
+	err := svc.HandleIncomingMessage(context.Background(), IncomingMessage{
+		ChatID:       "oc_chat",
+		ChatType:     "group",
+		MessageID:    "om_1",
+		RawText:      "<at user_id=\"ou_bot\"></at> /help",
+		MentionedIDs: []string{"ou_bot"},
+	})
+	if err != nil {
+		t.Fatalf("HandleIncomingMessage error: %v", err)
+	}
+	if len(sender.messages) == 0 {
+		t.Fatal("expected help response")
+	}
+	helpText := sender.messages[len(sender.messages)-1].Text
+	if !strings.Contains(helpText, "/mcp call codex") || !strings.Contains(helpText, "每次都会新建") {
+		t.Fatalf("expected /help to mention /mcp call codex starts new thread, got %q", helpText)
+	}
+}
+
 func TestHandleIncomingMessage_LogsIncomingAndOutgoingMessageDetails(t *testing.T) {
 	core, observed := observer.New(zapcore.InfoLevel)
 	logger := zap.New(core)
@@ -636,6 +669,41 @@ func TestHandleIncomingMessage_MCPCallCodexRequiresPrompt(t *testing.T) {
 	}
 	if mcp.calledWith.tool != "" {
 		t.Fatalf("expected no tool call for invalid codex args, got %q", mcp.calledWith.tool)
+	}
+}
+
+func TestHandleIncomingMessage_MCPCallCodexExplainsNewThreadBehavior(t *testing.T) {
+	mcp := &fakeMCPGateway{
+		callText: "ok\n{\"threadId\":\"codex_t1\"}",
+	}
+	sender := &fakeMessageSender{}
+	svc := NewCommandService(CommandServiceDeps{
+		MCP:        mcp,
+		Codex:      &fakeCodexGateway{},
+		Sender:     sender,
+		TopicStore: newFakeTopicStore(),
+		Config:     CommandServiceConfig{BotOpenID: "ou_bot", Heartbeat: time.Hour},
+	})
+
+	err := svc.HandleIncomingMessage(context.Background(), IncomingMessage{
+		ChatID:       "oc_chat",
+		ChatType:     "group",
+		MessageID:    "om_1",
+		RawText:      `<at user_id="ou_bot"></at> /mcp call codex {"prompt":"pwd"}`,
+		MentionedIDs: []string{"ou_bot"},
+	})
+	if err != nil {
+		t.Fatalf("HandleIncomingMessage error: %v", err)
+	}
+
+	if len(sender.messages) != 1 {
+		t.Fatalf("expected one response message, got %d", len(sender.messages))
+	}
+	if !strings.Contains(sender.messages[0].Text, "/mcp call codex") {
+		t.Fatalf("expected response to explain new-thread behavior, got %q", sender.messages[0].Text)
+	}
+	if !strings.Contains(sender.messages[0].Text, "每次都会新建") {
+		t.Fatalf("expected response to mention new thread behavior, got %q", sender.messages[0].Text)
 	}
 }
 

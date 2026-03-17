@@ -112,8 +112,11 @@ const (
 	processingStartReactionType = "OnIt"
 	codexToolName               = "codex"
 	mcpCodexTopicAlias          = "__mcp_codex__"
-	defaultHelpMessage          = "可用命令：\n/help\n/mcp tools\n/mcp schema <tool>\n/mcp call <tool> <json>\n/<project> <prompt>"
+	defaultHelpMessage          = "可用命令：\n/help\n/mcp tools\n/mcp schema <tool>\n/mcp call <tool> <json>\n/<project> <prompt>\n\n提示：/mcp call codex 每次都会新建 Codex 线程。"
 	codexPromptHelpMessage      = `用法：/mcp call codex {"prompt":"<你的问题>"}`
+	// Intentionally keep /mcp call codex as "start new thread" so users can open
+	// multiple independent Codex threads inside one Feishu topic when needed.
+	codexNewThreadNotice        = "提示：按设计，/mcp call codex 每次都会新建 Codex 线程，不会复用当前话题绑定。"
 	groupMentionHelpMessage     = "群聊里请先 @机器人 再发送斜杠命令，例如：@机器人 /help"
 	unknownProjectHelpPrefix    = "未知项目别名"
 )
@@ -401,7 +404,11 @@ func (s *CommandService) handleMCPCall(ctx context.Context, msg IncomingMessage,
 	if err != nil {
 		return s.replyCommandFailure(ctx, msg, "调用工具失败", err)
 	}
-	finalReceipt, err := s.send(ctx, msg, normalizeOutput(outcome.text))
+	responseText := normalizeOutput(outcome.text)
+	if strings.EqualFold(tool, codexToolName) {
+		responseText = appendTextNotice(responseText, codexNewThreadNotice)
+	}
+	finalReceipt, err := s.send(ctx, msg, responseText)
 	if err != nil {
 		return err
 	}
@@ -635,6 +642,18 @@ func normalizeOutput(output string) string {
 		return "执行完成。"
 	}
 	return output
+}
+
+func appendTextNotice(text, notice string) string {
+	text = strings.TrimSpace(text)
+	notice = strings.TrimSpace(notice)
+	if notice == "" {
+		return text
+	}
+	if text == "" {
+		return notice
+	}
+	return text + "\n\n" + notice
 }
 
 func chooseThreadID(candidates ...string) string {
