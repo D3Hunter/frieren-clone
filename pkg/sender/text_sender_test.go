@@ -41,9 +41,26 @@ func (f *fakeMessageAPI) Reply(ctx context.Context, req *larkim.ReplyMessageReq,
 	return f.replyResp, nil
 }
 
+type fakeReactionAPI struct {
+	reactionReqs []*larkim.CreateMessageReactionReq
+	reactionResp *larkim.CreateMessageReactionResp
+	err          error
+}
+
+func (f *fakeReactionAPI) Create(ctx context.Context, req *larkim.CreateMessageReactionReq, opts ...larkcore.RequestOptionFunc) (*larkim.CreateMessageReactionResp, error) {
+	f.reactionReqs = append(f.reactionReqs, req)
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.reactionResp == nil {
+		f.reactionResp = &larkim.CreateMessageReactionResp{CodeError: larkcore.CodeError{Code: 0}}
+	}
+	return f.reactionResp, nil
+}
+
 func TestSend_RequiresInputs(t *testing.T) {
-	api := &fakeMessageAPI{}
-	s := NewTextSender(api)
+	msgAPI := &fakeMessageAPI{}
+	s := NewTextSender(msgAPI, &fakeReactionAPI{})
 
 	_, err := s.Send(context.Background(), SendRequest{Text: "hello"})
 	if err == nil {
@@ -57,7 +74,7 @@ func TestSend_RequiresInputs(t *testing.T) {
 
 func TestSend_ReplyInThreadForTopicMessages(t *testing.T) {
 	api := &fakeMessageAPI{}
-	s := NewTextSender(api)
+	s := NewTextSender(api, &fakeReactionAPI{})
 
 	_, err := s.Send(context.Background(), SendRequest{ChatID: "oc_x", ReplyToMessageID: "om_msg", Text: "hello"})
 	if err != nil {
@@ -71,9 +88,9 @@ func TestSend_ReplyInThreadForTopicMessages(t *testing.T) {
 	}
 }
 
-func TestSend_UsesPostForShortPlainText(t *testing.T) {
+func TestSend_UsesTextForShortPlainText(t *testing.T) {
 	api := &fakeMessageAPI{}
-	s := NewTextSender(api)
+	s := NewTextSender(api, &fakeReactionAPI{})
 
 	_, err := s.Send(context.Background(), SendRequest{ChatID: "oc_x", ReplyToMessageID: "om_msg", Text: "处理完成"})
 	if err != nil {
@@ -82,14 +99,14 @@ func TestSend_UsesPostForShortPlainText(t *testing.T) {
 	if len(api.replyReqs) != 1 {
 		t.Fatalf("expected one reply request, got %d", len(api.replyReqs))
 	}
-	if api.replyReqs[0].Body.MsgType == nil || *api.replyReqs[0].Body.MsgType != "post" {
-		t.Fatalf("expected post msg type, got %+v", api.replyReqs[0].Body.MsgType)
+	if api.replyReqs[0].Body.MsgType == nil || *api.replyReqs[0].Body.MsgType != "text" {
+		t.Fatalf("expected text msg type, got %+v", api.replyReqs[0].Body.MsgType)
 	}
 }
 
 func TestSend_UsesTextForMarkdownAndCode(t *testing.T) {
 	api := &fakeMessageAPI{}
-	s := NewTextSender(api)
+	s := NewTextSender(api, &fakeReactionAPI{})
 
 	_, err := s.Send(context.Background(), SendRequest{ChatID: "oc_x", ReplyToMessageID: "om_msg", Text: "```go\nfmt.Println(1)\n```"})
 	if err != nil {
@@ -105,7 +122,7 @@ func TestSend_UsesTextForMarkdownAndCode(t *testing.T) {
 
 func TestSend_SplitsLongOutputIntoOrderedChunks(t *testing.T) {
 	api := &fakeMessageAPI{}
-	s := NewTextSender(api)
+	s := NewTextSender(api, &fakeReactionAPI{})
 	s.SetMaxChunkRunesForTest(40)
 
 	input := strings.Repeat("a", 120)
@@ -132,10 +149,28 @@ func TestSend_SplitsLongOutputIntoOrderedChunks(t *testing.T) {
 }
 
 func TestSend_PropagatesAPIError(t *testing.T) {
-	s := NewTextSender(&fakeMessageAPI{err: errors.New("boom")})
+	s := NewTextSender(&fakeMessageAPI{err: errors.New("boom")}, &fakeReactionAPI{err: errors.New("boom")})
 	_, err := s.Send(context.Background(), SendRequest{ChatID: "oc_x", ReplyToMessageID: "om_msg", Text: "hello"})
 	if err == nil {
 		t.Fatal("expected api error")
+	}
+}
+
+func TestAddReaction_UsesMessageReactionAPI(t *testing.T) {
+	reactionAPI := &fakeReactionAPI{}
+	s := NewTextSender(&fakeMessageAPI{}, reactionAPI)
+
+	if err := s.AddReaction(context.Background(), AddReactionRequest{MessageID: "om_msg", EmojiType: "OnIt"}); err != nil {
+		t.Fatalf("AddReaction error: %v", err)
+	}
+	if len(reactionAPI.reactionReqs) != 1 {
+		t.Fatalf("expected one reaction request, got %d", len(reactionAPI.reactionReqs))
+	}
+	if reactionAPI.reactionReqs[0].Body == nil || reactionAPI.reactionReqs[0].Body.ReactionType == nil || reactionAPI.reactionReqs[0].Body.ReactionType.EmojiType == nil {
+		t.Fatalf("expected reaction body with emoji type, got %+v", reactionAPI.reactionReqs[0].Body)
+	}
+	if *reactionAPI.reactionReqs[0].Body.ReactionType.EmojiType != "OnIt" {
+		t.Fatalf("expected OnIt emoji type, got %q", *reactionAPI.reactionReqs[0].Body.ReactionType.EmojiType)
 	}
 }
 

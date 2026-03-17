@@ -22,6 +22,7 @@ timeout_sec = 30
 [commands]
 bot_open_id = "ou_bot_open_id"
 heartbeat_sec = 180
+start_reaction = "OnIt"
 
 [runtime]
 topic_state_file = ".state/topic-state.json"

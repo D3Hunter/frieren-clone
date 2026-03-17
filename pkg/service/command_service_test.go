@@ -126,6 +126,7 @@ func (s *fakeTopicStore) Upsert(binding TopicBinding) error {
 
 type fakeMessageSender struct {
 	messages     []OutgoingMessage
+	reactions    []OutgoingReaction
 	fixedThread  string
 	returnThread string
 	err          error
@@ -147,6 +148,14 @@ func (s *fakeMessageSender) Send(ctx context.Context, msg OutgoingMessage) (Send
 		threadID = "omt_generated"
 	}
 	return SendReceipt{ThreadID: threadID}, nil
+}
+
+func (s *fakeMessageSender) AddReaction(ctx context.Context, reaction OutgoingReaction) error {
+	s.reactions = append(s.reactions, reaction)
+	if s.err != nil {
+		return s.err
+	}
+	return nil
 }
 
 func TestHandleIncomingMessage_HelpCommand(t *testing.T) {
@@ -255,11 +264,14 @@ func TestHandleIncomingMessage_ProjectCommandBindsTopic(t *testing.T) {
 		t.Fatalf("unexpected binding: %+v", binding)
 	}
 
-	if len(sender.messages) < 2 {
-		t.Fatalf("expected progress + final messages, got %d", len(sender.messages))
+	if len(sender.messages) < 1 {
+		t.Fatalf("expected final response message, got %d", len(sender.messages))
 	}
-	if sender.messages[0].Text != "⏳" {
-		t.Fatalf("expected first message to be hourglass, got %q", sender.messages[0].Text)
+	if len(sender.reactions) != 1 {
+		t.Fatalf("expected one processing reaction, got %d", len(sender.reactions))
+	}
+	if sender.reactions[0].EmojiType != "OnIt" {
+		t.Fatalf("expected OnIt reaction, got %q", sender.reactions[0].EmojiType)
 	}
 }
 
@@ -357,14 +369,17 @@ func TestHandleIncomingMessage_MCPCallToolErrorIsHandledWithoutPropagation(t *te
 		t.Fatalf("HandleIncomingMessage error: %v", err)
 	}
 
-	if len(sender.messages) != 2 {
-		t.Fatalf("expected hourglass and one failure message, got %d", len(sender.messages))
+	if len(sender.messages) != 1 {
+		t.Fatalf("expected one failure message, got %d", len(sender.messages))
 	}
-	if sender.messages[0].Text != "⏳" {
-		t.Fatalf("expected first message hourglass, got %q", sender.messages[0].Text)
+	if len(sender.reactions) != 1 {
+		t.Fatalf("expected one processing reaction, got %d", len(sender.reactions))
 	}
-	if !strings.Contains(sender.messages[1].Text, "调用工具失败") {
-		t.Fatalf("expected tool failure message, got %q", sender.messages[1].Text)
+	if sender.reactions[0].EmojiType != "OnIt" {
+		t.Fatalf("expected OnIt reaction, got %q", sender.reactions[0].EmojiType)
+	}
+	if !strings.Contains(sender.messages[0].Text, "调用工具失败") {
+		t.Fatalf("expected tool failure message, got %q", sender.messages[0].Text)
 	}
 }
 
@@ -394,16 +409,22 @@ func TestHandleIncomingMessage_HeartbeatWhileProcessing(t *testing.T) {
 		t.Fatalf("HandleIncomingMessage error: %v", err)
 	}
 
-	if len(sender.messages) < 3 {
-		t.Fatalf("expected hourglass + heartbeat + final, got %d", len(sender.messages))
+	if len(sender.reactions) != 1 {
+		t.Fatalf("expected one processing reaction, got %d", len(sender.reactions))
 	}
-	if sender.messages[0].Text != "⏳" {
-		t.Fatalf("expected first message hourglass, got %q", sender.messages[0].Text)
+	if sender.reactions[0].EmojiType != "OnIt" {
+		t.Fatalf("expected OnIt reaction, got %q", sender.reactions[0].EmojiType)
+	}
+	if len(sender.messages) < 2 {
+		t.Fatalf("expected heartbeat + final, got %d", len(sender.messages))
 	}
 	foundHeartbeat := false
-	for _, msg := range sender.messages[1:] {
+	for _, msg := range sender.messages {
 		if strings.Contains(msg.Text, "处理中") {
 			foundHeartbeat = true
+			if !strings.Contains(msg.Text, "已运行") {
+				t.Fatalf("expected heartbeat to include elapsed duration, got %q", msg.Text)
+			}
 			break
 		}
 	}
@@ -436,10 +457,50 @@ func TestHandleIncomingMessage_DependencyErrorsReplyToUserWithoutPropagation(t *
 	if err != nil {
 		t.Fatalf("HandleIncomingMessage error: %v", err)
 	}
-	if len(sender.messages) != 2 {
-		t.Fatalf("expected hourglass and one failure message, got %d", len(sender.messages))
+	if len(sender.messages) != 1 {
+		t.Fatalf("expected one failure message, got %d", len(sender.messages))
 	}
-	if !strings.Contains(sender.messages[1].Text, "执行失败") {
-		t.Fatalf("expected execution failure message, got %q", sender.messages[1].Text)
+	if len(sender.reactions) != 1 {
+		t.Fatalf("expected one processing reaction, got %d", len(sender.reactions))
+	}
+	if sender.reactions[0].EmojiType != "OnIt" {
+		t.Fatalf("expected OnIt reaction, got %q", sender.reactions[0].EmojiType)
+	}
+	if !strings.Contains(sender.messages[0].Text, "执行失败") {
+		t.Fatalf("expected execution failure message, got %q", sender.messages[0].Text)
+	}
+}
+
+func TestHandleIncomingMessage_UsesConfiguredStartReaction(t *testing.T) {
+	sender := &fakeMessageSender{}
+	codex := &fakeCodexGateway{startThreadID: "codex_t", startOutput: "ok"}
+	svc := NewCommandService(CommandServiceDeps{
+		MCP:        &fakeMCPGateway{},
+		Codex:      codex,
+		Sender:     sender,
+		TopicStore: newFakeTopicStore(),
+		Config: CommandServiceConfig{
+			BotOpenID:               "ou_bot",
+			Heartbeat:               time.Hour,
+			StartProcessingReaction: "Typing",
+			ProjectAliasCWD:         map[string]string{"tidb": "/work/tidb"},
+		},
+	})
+
+	err := svc.HandleIncomingMessage(context.Background(), IncomingMessage{
+		ChatID:       "oc_chat",
+		ChatType:     "group",
+		MessageID:    "om_1",
+		RawText:      "<at user_id=\"ou_bot\"></at> /tidb 长任务",
+		MentionedIDs: []string{"ou_bot"},
+	})
+	if err != nil {
+		t.Fatalf("HandleIncomingMessage error: %v", err)
+	}
+	if len(sender.reactions) != 1 {
+		t.Fatalf("expected one processing reaction, got %d", len(sender.reactions))
+	}
+	if sender.reactions[0].EmojiType != "Typing" {
+		t.Fatalf("expected Typing reaction, got %q", sender.reactions[0].EmojiType)
 	}
 }
