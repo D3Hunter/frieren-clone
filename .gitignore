@@ -37,3 +37,6 @@ prod.toml
 
 # Local planning artifacts
 docs/superpowers/plans/
+
+# binary
+bin/
