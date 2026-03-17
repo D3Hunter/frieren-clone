@@ -10,3 +10,12 @@ state persistence, and runtime defaults.
 
 When writing complex features or significant refactors, use an ExecPlan
 as described in `PLANS.md` from design to implementation.
+
+# PR Workflow
+
+- Do not use a `[codex]` prefix in PR titles.
+- When filing a PR, generate the title and description from the actual diff against `main`.
+- After merging a PR and rolling out to a new workspace:
+  1. Run `git fetch --prune` to remove stale remote branches.
+  2. Pull the latest `main`.
+  3. Switch to a fresh new working branch created from the updated `main`.
