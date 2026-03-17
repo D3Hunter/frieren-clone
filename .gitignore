@@ -26,6 +26,7 @@ go.work.sum
 
 # env file
 .env
+prod.toml
 
 # Editor/IDE
 # .idea/
@@ -33,3 +34,9 @@ go.work.sum
 
 # Local git worktrees
 .worktrees/
+
+# Local planning artifacts
+docs/superpowers/plans/
+
+# binary
+bin/
