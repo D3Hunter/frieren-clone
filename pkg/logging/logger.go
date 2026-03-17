@@ -9,15 +9,19 @@ import (
 )
 
 const (
+	// FormatText renders human-readable logs using zap's console encoder.
 	FormatText = "text"
+	// FormatJSON renders structured logs using zap's JSON encoder.
 	FormatJSON = "json"
 )
 
+// Options controls logger level and encoding format.
 type Options struct {
 	Level  string
 	Format string
 }
 
+// New creates a configured zap logger using normalized format and validated level.
 func New(options Options) (*zap.Logger, error) {
 	level, err := parseLevel(options.Level)
 	if err != nil {

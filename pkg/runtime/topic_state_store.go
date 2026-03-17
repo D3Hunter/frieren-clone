@@ -11,6 +11,7 @@ import (
 	"time"
 )
 
+// TopicState records one chat-topic to Codex-thread binding persisted on disk.
 type TopicState struct {
 	ChatID         string    `json:"chat_id"`
 	FeishuThreadID string    `json:"feishu_thread_id"`
@@ -19,6 +20,7 @@ type TopicState struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
+// TopicStateStore manages in-memory topic bindings with atomic JSON persistence.
 type TopicStateStore struct {
 	path    string
 	mu      sync.RWMutex
@@ -29,6 +31,7 @@ type topicStateFile struct {
 	Bindings []TopicState `json:"bindings"`
 }
 
+// NewTopicStateStore creates a TopicStateStore and loads existing bindings from path.
 func NewTopicStateStore(path string) (*TopicStateStore, error) {
 	store := &TopicStateStore{
 		path:    path,
@@ -40,6 +43,7 @@ func NewTopicStateStore(path string) (*TopicStateStore, error) {
 	return store, nil
 }
 
+// Get returns a stored topic binding by chat and Feishu thread IDs.
 func (s *TopicStateStore) Get(chatID, feishuThreadID string) (TopicState, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -47,6 +51,7 @@ func (s *TopicStateStore) Get(chatID, feishuThreadID string) (TopicState, bool) 
 	return entry, ok
 }
 
+// Upsert validates and stores a topic binding, then persists the full state file.
 func (s *TopicStateStore) Upsert(state TopicState) error {
 	state.ChatID = strings.TrimSpace(state.ChatID)
 	state.FeishuThreadID = strings.TrimSpace(state.FeishuThreadID)

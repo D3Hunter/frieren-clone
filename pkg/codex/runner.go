@@ -17,6 +17,7 @@ const (
 	defaultApproval = "never"
 )
 
+// Runner wraps Codex CLI invocations and parses JSONL events into service-friendly output.
 type Runner struct {
 	commandPath string
 	model       string
@@ -24,6 +25,7 @@ type Runner struct {
 	approval    string
 }
 
+// NewRunner builds a Runner with repository defaults for model and execution policy.
 func NewRunner() *Runner {
 	return &Runner{
 		commandPath: "codex",
@@ -33,6 +35,8 @@ func NewRunner() *Runner {
 	}
 }
 
+// Start executes a new Codex session and returns the created thread ID plus final agent message.
+// It runs `codex exec --json` and parses the JSONL stream to extract stable output fields.
 func (r *Runner) Start(ctx context.Context, cwd, prompt string) (string, string, error) {
 	args := []string{
 		"exec",
@@ -54,6 +58,8 @@ func (r *Runner) Start(ctx context.Context, cwd, prompt string) (string, string,
 	return threadID, message, nil
 }
 
+// Reply sends a prompt to an existing Codex thread and returns the final agent message text.
+// It prefers `codex-reply`, then falls back to `codex exec resume` when that binary is unavailable.
 func (r *Runner) Reply(ctx context.Context, cwd, threadID, prompt string) (string, error) {
 	threadID = strings.TrimSpace(threadID)
 	if threadID == "" {

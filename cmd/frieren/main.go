@@ -27,6 +27,7 @@ type mcpGatewayAdapter struct {
 	gateway *mcp.Gateway
 }
 
+// ListTools converts MCP gateway tool metadata into the command service shape.
 func (a mcpGatewayAdapter) ListTools(ctx context.Context) ([]service.ToolInfo, error) {
 	tools, err := a.gateway.ListTools(ctx)
 	if err != nil {
@@ -39,10 +40,12 @@ func (a mcpGatewayAdapter) ListTools(ctx context.Context) ([]service.ToolInfo, e
 	return out, nil
 }
 
+// GetToolSchema forwards schema lookup for a single MCP tool.
 func (a mcpGatewayAdapter) GetToolSchema(ctx context.Context, tool string) (string, error) {
 	return a.gateway.GetToolSchema(ctx, tool)
 }
 
+// CallTool forwards tool execution to the MCP gateway with raw JSON arguments.
 func (a mcpGatewayAdapter) CallTool(ctx context.Context, tool string, args map[string]any) (string, error) {
 	return a.gateway.CallTool(ctx, tool, args)
 }
@@ -51,6 +54,7 @@ type messageSenderAdapter struct {
 	sender *sender.TextSender
 }
 
+// Send maps service-level outgoing message fields into the concrete Feishu sender request.
 func (a messageSenderAdapter) Send(ctx context.Context, msg service.OutgoingMessage) (service.SendReceipt, error) {
 	receipt, err := a.sender.Send(ctx, sender.SendRequest{
 		ChatID:           msg.ChatID,
@@ -64,6 +68,7 @@ func (a messageSenderAdapter) Send(ctx context.Context, msg service.OutgoingMess
 	return service.SendReceipt{ThreadID: receipt.ThreadID}, nil
 }
 
+// AddReaction maps service-level reaction fields into the concrete Feishu sender request.
 func (a messageSenderAdapter) AddReaction(ctx context.Context, reaction service.OutgoingReaction) error {
 	return a.sender.AddReaction(ctx, sender.AddReactionRequest{
 		MessageID: reaction.MessageID,
@@ -71,6 +76,7 @@ func (a messageSenderAdapter) AddReaction(ctx context.Context, reaction service.
 	})
 }
 
+// Get converts persisted runtime topic state into the service topic binding type.
 func (a topicStoreAdapter) Get(chatID, feishuThreadID string) (service.TopicBinding, bool) {
 	state, ok := a.store.Get(chatID, feishuThreadID)
 	if !ok {
@@ -84,6 +90,7 @@ func (a topicStoreAdapter) Get(chatID, feishuThreadID string) (service.TopicBind
 	}, true
 }
 
+// Upsert converts a service topic binding into runtime state and persists it.
 func (a topicStoreAdapter) Upsert(binding service.TopicBinding) error {
 	return a.store.Upsert(runtime.TopicState{
 		ChatID:         binding.ChatID,

@@ -14,6 +14,7 @@ const (
 	defaultStartReaction = "OnIt"
 )
 
+// Config is the root TOML configuration consumed by the frieren executable.
 type Config struct {
 	App      AppConfig                `toml:"app"`
 	LongConn LongConnConfig           `toml:"long_conn"`
@@ -25,43 +26,51 @@ type Config struct {
 	Projects map[string]ProjectConfig `toml:"projects"`
 }
 
+// AppConfig stores Feishu application credentials.
 type AppConfig struct {
 	ID     string `toml:"id"`
 	Secret string `toml:"secret"`
 }
 
+// LongConnConfig controls websocket client logging and reconnect behavior.
 type LongConnConfig struct {
 	LogLevel            string `toml:"log_level"`
 	AutoReconnect       bool   `toml:"auto_reconnect"`
 	ReconnectBackoffSec int    `toml:"reconnect_backoff_sec"`
 }
 
+// MessageConfig controls legacy message behavior and bot-message filtering.
 type MessageConfig struct {
 	DefaultReply      string `toml:"default_reply"`
 	EchoMode          bool   `toml:"echo_mode"`
 	IgnoreBotMessages bool   `toml:"ignore_bot_messages"`
 }
 
+// LoggingConfig controls log level and output format for zap initialization.
 type LoggingConfig struct {
 	Level  string `toml:"level"`
 	Format string `toml:"format"`
 }
 
+// MCPConfig controls endpoint and timeout for MCP command calls.
 type MCPConfig struct {
 	Endpoint   string `toml:"endpoint"`
 	TimeoutSec int    `toml:"timeout_sec"`
 }
 
+// CommandsConfig controls slash-command runtime behavior in group and topic flows.
 type CommandsConfig struct {
 	BotOpenID     string `toml:"bot_open_id"`
 	HeartbeatSec  int    `toml:"heartbeat_sec"`
 	StartReaction string `toml:"start_reaction"`
 }
 
+// RuntimeConfig controls local runtime persistence paths.
 type RuntimeConfig struct {
 	TopicStateFile string `toml:"topic_state_file"`
 }
 
+// ProjectConfig binds a slash-command alias to a working directory.
 type ProjectConfig struct {
 	CWD string `toml:"cwd"`
 }
@@ -97,6 +106,7 @@ func defaultConfig() Config {
 	}
 }
 
+// Validate normalizes Config values, applies defaults, and rejects invalid required fields.
 func (c *Config) Validate() error {
 	if strings.TrimSpace(c.App.ID) == "" {
 		return fmt.Errorf("app.id is required")

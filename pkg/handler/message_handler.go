@@ -13,10 +13,13 @@ import (
 	"go.uber.org/zap"
 )
 
+// MessageService defines the command-service entrypoint used by MessageHandler.
 type MessageService interface {
+	// HandleIncomingMessage handles one normalized message event from MessageHandler.
 	HandleIncomingMessage(ctx context.Context, msg service.IncomingMessage) error
 }
 
+// MessageHandler translates Feishu websocket events into service-level incoming messages.
 type MessageHandler struct {
 	service           MessageService
 	ignoreBotMessages bool
@@ -29,6 +32,7 @@ type MessageHandler struct {
 
 const defaultMessageDedupeWindow = 10 * time.Minute
 
+// NewMessageHandler builds a MessageHandler with optional logger injection and dedupe defaults.
 func NewMessageHandler(messageService MessageService, ignoreBotMessages bool, loggers ...*zap.Logger) *MessageHandler {
 	logger := zap.NewNop()
 	for _, item := range loggers {
@@ -46,6 +50,7 @@ func NewMessageHandler(messageService MessageService, ignoreBotMessages bool, lo
 	}
 }
 
+// HandleEvent validates and normalizes a Feishu message event before forwarding it to MessageService.
 func (h *MessageHandler) HandleEvent(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 	if event == nil || event.Event == nil || event.Event.Message == nil {
 		h.logger.Info("received empty message event")
@@ -70,9 +75,7 @@ func (h *MessageHandler) HandleEvent(ctx context.Context, event *larkim.P2Messag
 	})
 	requestID := strings.TrimSpace(trace.RequestID)
 	correlationID := strings.TrimSpace(trace.CorrelationID)
-
-	h.logger.Info(
-		"received feishu event",
+	eventLogger := h.logger.With(
 		zap.String("chat_id", chatID),
 		zap.String("chat_type", chatType),
 		zap.String("message_id", messageID),
@@ -84,29 +87,16 @@ func (h *MessageHandler) HandleEvent(ctx context.Context, event *larkim.P2Messag
 		zap.String("correlation_id", correlationID),
 		zap.Strings("mentioned_ids", mentionedIDs),
 	)
+	eventLogger.Info("received feishu event")
 
 	if messageType != "text" {
-		h.logger.Info(
-			"ignored non-text message event",
-			zap.String("chat_id", chatID),
-			zap.String("message_id", messageID),
-			zap.String("message_type", messageType),
-			zap.String("request_id", requestID),
-			zap.String("correlation_id", correlationID),
-		)
+		eventLogger.Info("ignored non-text message event")
 		return nil
 	}
 
 	if h.ignoreBotMessages && event.Event.Sender != nil {
 		if senderType != "" && senderType != "user" {
-			h.logger.Info(
-				"ignored bot message event",
-				zap.String("chat_id", chatID),
-				zap.String("message_id", messageID),
-				zap.String("sender_type", senderType),
-				zap.String("request_id", requestID),
-				zap.String("correlation_id", correlationID),
-			)
+			eventLogger.Info("ignored bot message event")
 			return nil
 		}
 	}
@@ -118,46 +108,18 @@ func (h *MessageHandler) HandleEvent(ctx context.Context, event *larkim.P2Messag
 		return fmt.Errorf("event missing message id")
 	}
 	if h.isDuplicateEvent(chatID, messageID) {
-		h.logger.Info(
-			"ignored duplicated message event",
-			zap.String("chat_id", chatID),
-			zap.String("message_id", messageID),
-			zap.String("thread_id", threadID),
-			zap.String("topic_id", threadID),
-			zap.String("request_id", requestID),
-			zap.String("correlation_id", correlationID),
-		)
+		eventLogger.Info("ignored duplicated message event")
 		return nil
 	}
 
 	text, err := parseTextContent(stringValue(message.Content))
 	if err != nil {
-		h.logger.Error(
-			"parse text message content failed",
-			zap.String("chat_id", chatID),
-			zap.String("message_id", messageID),
-			zap.String("thread_id", threadID),
-			zap.String("topic_id", threadID),
-			zap.String("request_id", requestID),
-			zap.String("correlation_id", correlationID),
-			zap.Error(err),
-		)
+		eventLogger.Error("parse text message content failed", zap.Error(err))
 		return fmt.Errorf("parse text content: %w", err)
 	}
 	text = strings.TrimSpace(text)
 
-	h.logger.Info(
-		"dispatching text message to command service",
-		zap.String("chat_id", chatID),
-		zap.String("chat_type", chatType),
-		zap.String("message_id", messageID),
-		zap.String("thread_id", threadID),
-		zap.String("topic_id", threadID),
-		zap.String("request_id", requestID),
-		zap.String("correlation_id", correlationID),
-		zap.String("text", text),
-		zap.Strings("mentioned_ids", mentionedIDs),
-	)
+	eventLogger.Info("dispatching text message to command service", zap.String("text", text))
 
 	if err := h.service.HandleIncomingMessage(ctx, service.IncomingMessage{
 		ChatID:        chatID,
@@ -169,27 +131,10 @@ func (h *MessageHandler) HandleEvent(ctx context.Context, event *larkim.P2Messag
 		RequestID:     requestID,
 		CorrelationID: correlationID,
 	}); err != nil {
-		h.logger.Error(
-			"command service returned error",
-			zap.String("chat_id", chatID),
-			zap.String("message_id", messageID),
-			zap.String("thread_id", threadID),
-			zap.String("topic_id", threadID),
-			zap.String("request_id", requestID),
-			zap.String("correlation_id", correlationID),
-			zap.Error(err),
-		)
+		eventLogger.Error("command service returned error", zap.Error(err))
 		return fmt.Errorf("handle incoming message: %w", err)
 	}
-	h.logger.Info(
-		"command service handled message",
-		zap.String("chat_id", chatID),
-		zap.String("message_id", messageID),
-		zap.String("thread_id", threadID),
-		zap.String("topic_id", threadID),
-		zap.String("request_id", requestID),
-		zap.String("correlation_id", correlationID),
-	)
+	eventLogger.Info("command service handled message")
 	return nil
 }
 
