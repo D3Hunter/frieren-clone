@@ -14,3 +14,17 @@ ignore_bot_messages = true
 
 [logging]
 level = "info"
+
+[mcp]
+endpoint = "http://localhost:8787/mcp"
+timeout_sec = 30
+
+[commands]
+bot_open_id = "ou_bot_open_id"
+heartbeat_sec = 180
+
+[runtime]
+topic_state_file = ".state/topic-state.json"
+
+[projects.tidb]
+cwd = "/Users/jujiajia/code/tidb"

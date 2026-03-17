@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
@@ -11,80 +12,133 @@ import (
 )
 
 type fakeMessageAPI struct {
-	lastReq  *larkim.CreateMessageReq
-	lastOpts []larkcore.RequestOptionFunc
-	resp     *larkim.CreateMessageResp
-	err      error
+	createReqs []*larkim.CreateMessageReq
+	replyReqs  []*larkim.ReplyMessageReq
+	createResp *larkim.CreateMessageResp
+	replyResp  *larkim.ReplyMessageResp
+	err        error
 }
 
 func (f *fakeMessageAPI) Create(ctx context.Context, req *larkim.CreateMessageReq, opts ...larkcore.RequestOptionFunc) (*larkim.CreateMessageResp, error) {
-	f.lastReq = req
-	f.lastOpts = opts
+	f.createReqs = append(f.createReqs, req)
 	if f.err != nil {
 		return nil, f.err
 	}
-	if f.resp == nil {
-		f.resp = &larkim.CreateMessageResp{}
+	if f.createResp == nil {
+		f.createResp = &larkim.CreateMessageResp{CodeError: larkcore.CodeError{Code: 0}}
 	}
-	return f.resp, nil
+	return f.createResp, nil
 }
 
-func TestSendText_RequiresInputs(t *testing.T) {
+func (f *fakeMessageAPI) Reply(ctx context.Context, req *larkim.ReplyMessageReq, opts ...larkcore.RequestOptionFunc) (*larkim.ReplyMessageResp, error) {
+	f.replyReqs = append(f.replyReqs, req)
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.replyResp == nil {
+		f.replyResp = &larkim.ReplyMessageResp{CodeError: larkcore.CodeError{Code: 0}, Data: &larkim.ReplyMessageRespData{ThreadId: strPtr("omt_topic")}}
+	}
+	return f.replyResp, nil
+}
+
+func TestSend_RequiresInputs(t *testing.T) {
 	api := &fakeMessageAPI{}
 	s := NewTextSender(api)
 
-	if err := s.SendText(context.Background(), "", "hello"); err == nil {
+	_, err := s.Send(context.Background(), SendRequest{Text: "hello"})
+	if err == nil {
 		t.Fatal("expected error for empty chat id")
 	}
-	if err := s.SendText(context.Background(), "oc_x", ""); err == nil {
+	_, err = s.Send(context.Background(), SendRequest{ChatID: "oc_x"})
+	if err == nil {
 		t.Fatal("expected error for empty text")
 	}
 }
 
-func TestSendText_BuildsTextMessageBody(t *testing.T) {
-	api := &fakeMessageAPI{resp: &larkim.CreateMessageResp{CodeError: larkcore.CodeError{Code: 0}}}
+func TestSend_ReplyInThreadForTopicMessages(t *testing.T) {
+	api := &fakeMessageAPI{}
 	s := NewTextSender(api)
 
-	if err := s.SendText(context.Background(), "oc_x", "hello"); err != nil {
-		t.Fatalf("SendText returned error: %v", err)
+	_, err := s.Send(context.Background(), SendRequest{ChatID: "oc_x", ReplyToMessageID: "om_msg", Text: "hello"})
+	if err != nil {
+		t.Fatalf("Send error: %v", err)
 	}
-
-	if api.lastReq == nil || api.lastReq.Body == nil {
-		t.Fatal("expected CreateMessageReq body to be set")
+	if len(api.replyReqs) != 1 {
+		t.Fatalf("expected one reply request, got %d", len(api.replyReqs))
 	}
-	if api.lastReq.Body.ReceiveId == nil || *api.lastReq.Body.ReceiveId != "oc_x" {
-		t.Fatalf("unexpected receive id: %+v", api.lastReq.Body.ReceiveId)
-	}
-	if api.lastReq.Body.MsgType == nil || *api.lastReq.Body.MsgType != "text" {
-		t.Fatalf("unexpected msg type: %+v", api.lastReq.Body.MsgType)
-	}
-	if api.lastReq.Body.Content == nil {
-		t.Fatal("expected content")
-	}
-
-	var content struct {
-		Text string `json:"text"`
-	}
-	if err := json.Unmarshal([]byte(*api.lastReq.Body.Content), &content); err != nil {
-		t.Fatalf("content is not valid json: %v", err)
-	}
-	if content.Text != "hello" {
-		t.Fatalf("unexpected content text: %q", content.Text)
+	if api.replyReqs[0].Body == nil || api.replyReqs[0].Body.ReplyInThread == nil || !*api.replyReqs[0].Body.ReplyInThread {
+		t.Fatal("expected reply_in_thread=true")
 	}
 }
 
-func TestSendText_PropagatesErrors(t *testing.T) {
-	t.Run("request error", func(t *testing.T) {
-		s := NewTextSender(&fakeMessageAPI{err: errors.New("boom")})
-		if err := s.SendText(context.Background(), "oc_x", "hello"); err == nil {
-			t.Fatal("expected request error")
-		}
-	})
+func TestSend_UsesPostForShortPlainText(t *testing.T) {
+	api := &fakeMessageAPI{}
+	s := NewTextSender(api)
 
-	t.Run("api code error", func(t *testing.T) {
-		s := NewTextSender(&fakeMessageAPI{resp: &larkim.CreateMessageResp{CodeError: larkcore.CodeError{Code: 90001, Msg: "failed"}}})
-		if err := s.SendText(context.Background(), "oc_x", "hello"); err == nil {
-			t.Fatal("expected api code error")
+	_, err := s.Send(context.Background(), SendRequest{ChatID: "oc_x", ReplyToMessageID: "om_msg", Text: "处理完成"})
+	if err != nil {
+		t.Fatalf("Send error: %v", err)
+	}
+	if len(api.replyReqs) != 1 {
+		t.Fatalf("expected one reply request, got %d", len(api.replyReqs))
+	}
+	if api.replyReqs[0].Body.MsgType == nil || *api.replyReqs[0].Body.MsgType != "post" {
+		t.Fatalf("expected post msg type, got %+v", api.replyReqs[0].Body.MsgType)
+	}
+}
+
+func TestSend_UsesTextForMarkdownAndCode(t *testing.T) {
+	api := &fakeMessageAPI{}
+	s := NewTextSender(api)
+
+	_, err := s.Send(context.Background(), SendRequest{ChatID: "oc_x", ReplyToMessageID: "om_msg", Text: "```go\nfmt.Println(1)\n```"})
+	if err != nil {
+		t.Fatalf("Send error: %v", err)
+	}
+	if len(api.replyReqs) != 1 {
+		t.Fatalf("expected one reply request, got %d", len(api.replyReqs))
+	}
+	if api.replyReqs[0].Body.MsgType == nil || *api.replyReqs[0].Body.MsgType != "text" {
+		t.Fatalf("expected text msg type, got %+v", api.replyReqs[0].Body.MsgType)
+	}
+}
+
+func TestSend_SplitsLongOutputIntoOrderedChunks(t *testing.T) {
+	api := &fakeMessageAPI{}
+	s := NewTextSender(api)
+	s.SetMaxChunkRunesForTest(40)
+
+	input := strings.Repeat("a", 120)
+	_, err := s.Send(context.Background(), SendRequest{ChatID: "oc_x", ReplyToMessageID: "om_msg", Text: input})
+	if err != nil {
+		t.Fatalf("Send error: %v", err)
+	}
+	if len(api.replyReqs) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(api.replyReqs))
+	}
+
+	for i, req := range api.replyReqs {
+		if req.Body == nil || req.Body.Content == nil {
+			t.Fatalf("chunk %d missing content", i)
 		}
-	})
+		var content map[string]string
+		if err := json.Unmarshal([]byte(*req.Body.Content), &content); err != nil {
+			t.Fatalf("chunk %d invalid json content: %v", i, err)
+		}
+		if !strings.Contains(content["text"], "[") {
+			t.Fatalf("chunk %d missing ordering prefix: %q", i, content["text"])
+		}
+	}
+}
+
+func TestSend_PropagatesAPIError(t *testing.T) {
+	s := NewTextSender(&fakeMessageAPI{err: errors.New("boom")})
+	_, err := s.Send(context.Background(), SendRequest{ChatID: "oc_x", ReplyToMessageID: "om_msg", Text: "hello"})
+	if err == nil {
+		t.Fatal("expected api error")
+	}
+}
+
+func strPtr(v string) *string {
+	return &v
 }
