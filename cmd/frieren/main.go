@@ -4,16 +4,19 @@ import (
 	"context"
 	"flag"
 	"log"
+	"os"
 	"time"
 
 	"github.com/D3Hunter/frieren-clone/pkg/codex"
 	"github.com/D3Hunter/frieren-clone/pkg/config"
 	"github.com/D3Hunter/frieren-clone/pkg/feishu"
 	"github.com/D3Hunter/frieren-clone/pkg/handler"
+	"github.com/D3Hunter/frieren-clone/pkg/logging"
 	"github.com/D3Hunter/frieren-clone/pkg/mcp"
 	"github.com/D3Hunter/frieren-clone/pkg/runtime"
 	"github.com/D3Hunter/frieren-clone/pkg/sender"
 	"github.com/D3Hunter/frieren-clone/pkg/service"
+	"go.uber.org/zap"
 )
 
 type topicStoreAdapter struct {
@@ -99,11 +102,23 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
-	appClient := feishu.NewAppClient(*cfg)
+	logger, err := logging.New(logging.Options{
+		Level:  cfg.Logging.Level,
+		Format: cfg.Logging.Format,
+	})
+	if err != nil {
+		log.Fatalf("init logger: %v", err)
+	}
+	defer func() {
+		_ = logger.Sync()
+	}()
+
+	appClient := feishu.NewAppClient(*cfg, logger)
 	textSender := sender.NewTextSender(appClient.Im.V1.Message, appClient.Im.V1.MessageReaction)
 	topicStore, err := runtime.NewTopicStateStore(cfg.Runtime.TopicStateFile)
 	if err != nil {
-		log.Fatalf("init topic state store: %v", err)
+		logger.Error("init topic state store failed", zap.Error(err))
+		os.Exit(1)
 	}
 	projectAliasCWD := make(map[string]string, len(cfg.Projects))
 	for alias, project := range cfg.Projects {
@@ -123,10 +138,11 @@ func main() {
 	})
 	messageHandler := handler.NewMessageHandler(commandService, cfg.Message.IgnoreBotMessages)
 
-	wsClient := feishu.NewWSClient(*cfg, messageHandler.HandleEvent)
+	wsClient := feishu.NewWSClient(*cfg, messageHandler.HandleEvent, logger)
 
-	log.Printf("starting long connection client")
+	logger.Info("starting long connection client")
 	if err := wsClient.Start(context.Background()); err != nil {
-		log.Fatalf("start long connection client: %v", err)
+		logger.Error("start long connection client failed", zap.Error(err))
+		os.Exit(1)
 	}
 }

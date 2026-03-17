@@ -43,7 +43,8 @@ type MessageConfig struct {
 }
 
 type LoggingConfig struct {
-	Level string `toml:"level"`
+	Level  string `toml:"level"`
+	Format string `toml:"format"`
 }
 
 type MCPConfig struct {
@@ -78,7 +79,8 @@ func defaultConfig() Config {
 			IgnoreBotMessages: true,
 		},
 		Logging: LoggingConfig{
-			Level: "info",
+			Level:  "info",
+			Format: "text",
 		},
 		MCP: MCPConfig{
 			Endpoint:   defaultMCPEndpoint,
@@ -112,6 +114,10 @@ func (c *Config) Validate() error {
 	}
 	if c.Logging.Level == "" {
 		c.Logging.Level = "info"
+	}
+	c.Logging.Format = strings.ToLower(strings.TrimSpace(c.Logging.Format))
+	if c.Logging.Format == "" {
+		c.Logging.Format = "text"
 	}
 	if c.Message.DefaultReply == "" {
 		c.Message.DefaultReply = defaultReply

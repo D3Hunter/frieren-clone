@@ -19,6 +19,9 @@ start_reaction='Typing'
 [runtime]
 topic_state_file='./tmp/topic-state.json'
 
+[logging]
+format='json'
+
 [projects.tidb]
 cwd='/Users/me/tidb'
 
@@ -42,6 +45,9 @@ cwd='/Users/me/play'
 	}
 	if cfg.Runtime.TopicStateFile != "./tmp/topic-state.json" {
 		t.Fatalf("unexpected topic state file: %q", cfg.Runtime.TopicStateFile)
+	}
+	if cfg.Logging.Format != "json" {
+		t.Fatalf("unexpected logging format: %q", cfg.Logging.Format)
 	}
 	if len(cfg.Projects) != 2 {
 		t.Fatalf("expected 2 projects, got %d", len(cfg.Projects))
@@ -71,6 +77,9 @@ func TestLoadFromBytes_AppliesMCPAndCommandDefaults(t *testing.T) {
 	}
 	if cfg.Runtime.TopicStateFile == "" {
 		t.Fatal("expected topic_state_file default")
+	}
+	if cfg.Logging.Format != "text" {
+		t.Fatalf("expected default logging format text, got %q", cfg.Logging.Format)
 	}
 }
 

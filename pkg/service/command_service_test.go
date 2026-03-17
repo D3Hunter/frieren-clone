@@ -18,6 +18,10 @@ type fakeMCPGateway struct {
 		tool string
 		args map[string]any
 	}
+	callHistory []struct {
+		tool string
+		args map[string]any
+	}
 }
 
 func (f *fakeMCPGateway) ListTools(ctx context.Context) ([]ToolInfo, error) {
@@ -34,6 +38,14 @@ func (f *fakeMCPGateway) GetToolSchema(ctx context.Context, tool string) (string
 func (f *fakeMCPGateway) CallTool(ctx context.Context, tool string, args map[string]any) (string, error) {
 	f.calledWith.tool = tool
 	f.calledWith.args = args
+	clonedArgs := make(map[string]any, len(args))
+	for key, value := range args {
+		clonedArgs[key] = value
+	}
+	f.callHistory = append(f.callHistory, struct {
+		tool string
+		args map[string]any
+	}{tool: tool, args: clonedArgs})
 	if f.callErr != nil {
 		return "", f.callErr
 	}
@@ -41,6 +53,123 @@ func (f *fakeMCPGateway) CallTool(ctx context.Context, tool string, args map[str
 		return "ok", nil
 	}
 	return f.callText, nil
+}
+
+func TestHandleIncomingMessage_MCPCallCodexReusesThreadWithinTopic(t *testing.T) {
+	mcp := &fakeMCPGateway{
+		callText: "ok\n{\"threadId\":\"codex_t1\"}",
+	}
+	sender := &fakeMessageSender{}
+	svc := NewCommandService(CommandServiceDeps{
+		MCP:        mcp,
+		Codex:      &fakeCodexGateway{},
+		Sender:     sender,
+		TopicStore: newFakeTopicStore(),
+		Config:     CommandServiceConfig{BotOpenID: "ou_bot", Heartbeat: time.Hour},
+	})
+
+	first := IncomingMessage{
+		ChatID:       "oc_chat",
+		ThreadID:     "omt_topic",
+		ChatType:     "group",
+		MessageID:    "om_1",
+		RawText:      `<at user_id="ou_bot"></at> /mcp call codex {"prompt":"pwd"}`,
+		MentionedIDs: []string{"ou_bot"},
+	}
+	if err := svc.HandleIncomingMessage(context.Background(), first); err != nil {
+		t.Fatalf("first HandleIncomingMessage error: %v", err)
+	}
+
+	second := IncomingMessage{
+		ChatID:       "oc_chat",
+		ThreadID:     "omt_topic",
+		ChatType:     "group",
+		MessageID:    "om_2",
+		RawText:      `<at user_id="ou_bot"></at> /mcp call codex {"prompt":"ls"}`,
+		MentionedIDs: []string{"ou_bot"},
+	}
+	if err := svc.HandleIncomingMessage(context.Background(), second); err != nil {
+		t.Fatalf("second HandleIncomingMessage error: %v", err)
+	}
+
+	if len(mcp.callHistory) != 2 {
+		t.Fatalf("expected two codex calls, got %d", len(mcp.callHistory))
+	}
+	if _, ok := mcp.callHistory[0].args["threadId"]; ok {
+		t.Fatalf("expected first call without injected threadId, got %#v", mcp.callHistory[0].args["threadId"])
+	}
+	gotThreadID, ok := mcp.callHistory[1].args["threadId"].(string)
+	if !ok || gotThreadID != "codex_t1" {
+		t.Fatalf("expected second call to reuse codex_t1, got %#v", mcp.callHistory[1].args["threadId"])
+	}
+}
+
+func TestHandleIncomingMessage_MCPCallCodexPersistsTopicThreadForNewService(t *testing.T) {
+	topicStore := newFakeTopicStore()
+	firstMCP := &fakeMCPGateway{
+		callText: "ok\n{\"threadId\":\"codex_t1\"}",
+	}
+	firstSvc := NewCommandService(CommandServiceDeps{
+		MCP:        firstMCP,
+		Codex:      &fakeCodexGateway{},
+		Sender:     &fakeMessageSender{},
+		TopicStore: topicStore,
+		Config:     CommandServiceConfig{BotOpenID: "ou_bot", Heartbeat: time.Hour},
+	})
+
+	firstMsg := IncomingMessage{
+		ChatID:       "oc_chat",
+		ThreadID:     "omt_topic",
+		ChatType:     "group",
+		MessageID:    "om_1",
+		RawText:      `<at user_id="ou_bot"></at> /mcp call codex {"prompt":"pwd"}`,
+		MentionedIDs: []string{"ou_bot"},
+	}
+	if err := firstSvc.HandleIncomingMessage(context.Background(), firstMsg); err != nil {
+		t.Fatalf("first HandleIncomingMessage error: %v", err)
+	}
+
+	binding, ok := topicStore.Get("oc_chat", "omt_topic")
+	if !ok {
+		t.Fatal("expected persisted topic binding for mcp codex thread")
+	}
+	if binding.ProjectAlias != mcpCodexTopicAlias {
+		t.Fatalf("expected mcp codex alias, got %q", binding.ProjectAlias)
+	}
+	if binding.CodexThreadID != "codex_t1" {
+		t.Fatalf("expected codex_t1, got %q", binding.CodexThreadID)
+	}
+
+	secondMCP := &fakeMCPGateway{
+		callText: "ok\n{\"threadId\":\"codex_t1\"}",
+	}
+	secondSvc := NewCommandService(CommandServiceDeps{
+		MCP:        secondMCP,
+		Codex:      &fakeCodexGateway{},
+		Sender:     &fakeMessageSender{},
+		TopicStore: topicStore,
+		Config:     CommandServiceConfig{BotOpenID: "ou_bot", Heartbeat: time.Hour},
+	})
+
+	secondMsg := IncomingMessage{
+		ChatID:       "oc_chat",
+		ThreadID:     "omt_topic",
+		ChatType:     "group",
+		MessageID:    "om_2",
+		RawText:      `<at user_id="ou_bot"></at> /mcp call codex {"prompt":"ls"}`,
+		MentionedIDs: []string{"ou_bot"},
+	}
+	if err := secondSvc.HandleIncomingMessage(context.Background(), secondMsg); err != nil {
+		t.Fatalf("second HandleIncomingMessage error: %v", err)
+	}
+
+	if len(secondMCP.callHistory) != 1 {
+		t.Fatalf("expected one call on second service, got %d", len(secondMCP.callHistory))
+	}
+	gotThreadID, ok := secondMCP.callHistory[0].args["threadId"].(string)
+	if !ok || gotThreadID != "codex_t1" {
+		t.Fatalf("expected persisted threadId codex_t1, got %#v", secondMCP.callHistory[0].args["threadId"])
+	}
 }
 
 type fakeCodexGateway struct {
@@ -362,7 +491,7 @@ func TestHandleIncomingMessage_MCPCallToolErrorIsHandledWithoutPropagation(t *te
 		ChatID:       "oc_chat",
 		ChatType:     "group",
 		MessageID:    "om_1",
-		RawText:      `<at user_id="ou_bot"></at> /mcp call codex {"topic":"x"}`,
+		RawText:      `<at user_id="ou_bot"></at> /mcp call codex {"prompt":"x"}`,
 		MentionedIDs: []string{"ou_bot"},
 	})
 	if err != nil {
@@ -380,6 +509,90 @@ func TestHandleIncomingMessage_MCPCallToolErrorIsHandledWithoutPropagation(t *te
 	}
 	if !strings.Contains(sender.messages[0].Text, "调用工具失败") {
 		t.Fatalf("expected tool failure message, got %q", sender.messages[0].Text)
+	}
+}
+
+func TestHandleIncomingMessage_MCPCallCodexRequiresPrompt(t *testing.T) {
+	mcp := &fakeMCPGateway{}
+	sender := &fakeMessageSender{}
+	svc := NewCommandService(CommandServiceDeps{
+		MCP:        mcp,
+		Codex:      &fakeCodexGateway{},
+		Sender:     sender,
+		TopicStore: newFakeTopicStore(),
+		Config:     CommandServiceConfig{BotOpenID: "ou_bot", Heartbeat: time.Hour},
+	})
+
+	err := svc.HandleIncomingMessage(context.Background(), IncomingMessage{
+		ChatID:       "oc_chat",
+		ChatType:     "group",
+		MessageID:    "om_1",
+		RawText:      `<at user_id="ou_bot"></at> /mcp call codex {}`,
+		MentionedIDs: []string{"ou_bot"},
+	})
+	if err != nil {
+		t.Fatalf("HandleIncomingMessage error: %v", err)
+	}
+
+	if len(sender.messages) != 1 {
+		t.Fatalf("expected one validation message, got %d", len(sender.messages))
+	}
+	if !strings.Contains(sender.messages[0].Text, "prompt") {
+		t.Fatalf("expected prompt validation in response, got %q", sender.messages[0].Text)
+	}
+	if mcp.calledWith.tool != "" {
+		t.Fatalf("expected no tool call for invalid codex args, got %q", mcp.calledWith.tool)
+	}
+}
+
+func TestHandleIncomingMessage_MCPCallCodexReusesTopicThread(t *testing.T) {
+	topicStore := newFakeTopicStore()
+	if err := topicStore.Upsert(TopicBinding{
+		ChatID:         "oc_chat",
+		FeishuThreadID: "omt_topic",
+		ProjectAlias:   "tidb",
+		CodexThreadID:  "codex_existing",
+	}); err != nil {
+		t.Fatalf("seed topic store: %v", err)
+	}
+
+	mcp := &fakeMCPGateway{
+		callText: "ok\n{\n  \"threadId\": \"codex_next\"\n}",
+	}
+	sender := &fakeMessageSender{}
+	svc := NewCommandService(CommandServiceDeps{
+		MCP:        mcp,
+		Codex:      &fakeCodexGateway{},
+		Sender:     sender,
+		TopicStore: topicStore,
+		Config: CommandServiceConfig{
+			BotOpenID:       "ou_bot",
+			Heartbeat:       time.Hour,
+			ProjectAliasCWD: map[string]string{"tidb": "/work/tidb"},
+		},
+	})
+
+	err := svc.HandleIncomingMessage(context.Background(), IncomingMessage{
+		ChatID:       "oc_chat",
+		ThreadID:     "omt_topic",
+		ChatType:     "group",
+		MessageID:    "om_1",
+		RawText:      `<at user_id="ou_bot"></at> /mcp call codex {"prompt":"pwd"}`,
+		MentionedIDs: []string{"ou_bot"},
+	})
+	if err != nil {
+		t.Fatalf("HandleIncomingMessage error: %v", err)
+	}
+	threadID, ok := mcp.calledWith.args["threadId"].(string)
+	if !ok || threadID != "codex_existing" {
+		t.Fatalf("expected injected codex thread id, got %#v", mcp.calledWith.args["threadId"])
+	}
+	binding, ok := topicStore.Get("oc_chat", "omt_topic")
+	if !ok {
+		t.Fatal("expected topic binding to remain")
+	}
+	if binding.CodexThreadID != "codex_next" {
+		t.Fatalf("expected updated codex thread id, got %q", binding.CodexThreadID)
 	}
 }
 

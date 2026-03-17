@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/D3Hunter/frieren-clone/pkg/service"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
@@ -17,12 +19,20 @@ type MessageService interface {
 type MessageHandler struct {
 	service           MessageService
 	ignoreBotMessages bool
+
+	dedupeMu      sync.Mutex
+	seenMessageAt map[string]time.Time
+	dedupeWindow  time.Duration
 }
+
+const defaultMessageDedupeWindow = 10 * time.Minute
 
 func NewMessageHandler(messageService MessageService, ignoreBotMessages bool) *MessageHandler {
 	return &MessageHandler{
 		service:           messageService,
 		ignoreBotMessages: ignoreBotMessages,
+		seenMessageAt:     map[string]time.Time{},
+		dedupeWindow:      defaultMessageDedupeWindow,
 	}
 }
 
@@ -50,6 +60,9 @@ func (h *MessageHandler) HandleEvent(ctx context.Context, event *larkim.P2Messag
 	messageID := strings.TrimSpace(stringValue(message.MessageId))
 	if messageID == "" {
 		return fmt.Errorf("event missing message id")
+	}
+	if h.isDuplicateEvent(chatID, messageID) {
+		return nil
 	}
 
 	text, err := parseTextContent(stringValue(message.Content))
@@ -99,4 +112,29 @@ func stringValue(v *string) string {
 		return ""
 	}
 	return *v
+}
+
+func (h *MessageHandler) isDuplicateEvent(chatID, messageID string) bool {
+	chatID = strings.TrimSpace(chatID)
+	messageID = strings.TrimSpace(messageID)
+	if chatID == "" || messageID == "" {
+		return false
+	}
+	now := time.Now()
+	cutoff := now.Add(-h.dedupeWindow)
+	key := chatID + "::" + messageID
+
+	h.dedupeMu.Lock()
+	defer h.dedupeMu.Unlock()
+
+	for seenKey, seenAt := range h.seenMessageAt {
+		if seenAt.Before(cutoff) {
+			delete(h.seenMessageAt, seenKey)
+		}
+	}
+	if _, exists := h.seenMessageAt[key]; exists {
+		return true
+	}
+	h.seenMessageAt[key] = now
+	return false
 }
