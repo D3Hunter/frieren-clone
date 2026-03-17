@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -89,14 +90,21 @@ type CommandService struct {
 	sender     MessageSender
 	topicStore TopicStore
 	cfg        CommandServiceConfig
+
+	mcpCodexTopicThreads map[string]string
+	mcpCodexTopicMu      sync.RWMutex
 }
 
 var mentionTagPattern = regexp.MustCompile(`(?s)<at\b[^>]*>.*?</at>`)
 var projectCommandPattern = regexp.MustCompile(`^/([a-zA-Z0-9_-]+)\s+(.+)$`)
+var codexThreadIDPattern = regexp.MustCompile(`(?i)"thread(?:_|)id"\s*:\s*"([^"]+)"`)
 
 const (
 	processingStartReactionType = "OnIt"
+	codexToolName               = "codex"
+	mcpCodexTopicAlias          = "__mcp_codex__"
 	defaultHelpMessage          = "可用命令：\n/help\n/mcp tools\n/mcp schema <tool>\n/mcp call <tool> <json>\n/<project> <prompt>"
+	codexPromptHelpMessage      = `用法：/mcp call codex {"prompt":"<你的问题>"}`
 	groupMentionHelpMessage     = "群聊里请先 @机器人 再发送斜杠命令，例如：@机器人 /help"
 	unknownProjectHelpPrefix    = "未知项目别名"
 )
@@ -125,6 +133,8 @@ func NewCommandService(deps CommandServiceDeps) *CommandService {
 		sender:     deps.Sender,
 		topicStore: deps.TopicStore,
 		cfg:        cfg,
+
+		mcpCodexTopicThreads: map[string]string{},
 	}
 }
 
@@ -149,6 +159,9 @@ func (s *CommandService) HandleIncomingMessage(ctx context.Context, msg Incoming
 	binding, hasBinding := TopicBinding{}, false
 	if msg.ThreadID != "" && s.topicStore != nil {
 		binding, hasBinding = s.topicStore.Get(msg.ChatID, msg.ThreadID)
+		if hasBinding && !s.bindingSupportsProjectFollowup(binding) {
+			hasBinding = false
+		}
 	}
 
 	if strings.HasPrefix(cleanText, "/") {
@@ -216,6 +229,10 @@ func (s *CommandService) handleSlashCommand(ctx context.Context, msg IncomingMes
 		}
 		if args == nil {
 			args = map[string]any{}
+		}
+		if strings.EqualFold(tool, codexToolName) && strings.TrimSpace(stringArg(args, "prompt")) == "" {
+			_, err := s.send(ctx, msg, codexPromptHelpMessage)
+			return err
 		}
 		return s.handleMCPCall(ctx, msg, tool, args)
 	default:
@@ -304,6 +321,10 @@ func (s *CommandService) handleMCPSchema(ctx context.Context, msg IncomingMessag
 }
 
 func (s *CommandService) handleMCPCall(ctx context.Context, msg IncomingMessage, tool string, args map[string]any) error {
+	tool = strings.TrimSpace(tool)
+	if strings.EqualFold(tool, codexToolName) {
+		s.injectCodexThreadID(msg.ChatID, msg.ThreadID, args)
+	}
 	outcome, err := s.executeWithHeartbeat(ctx, msg, func(runCtx context.Context) (commandOutcome, error) {
 		result, runErr := s.mcp.CallTool(runCtx, tool, args)
 		if runErr != nil {
@@ -314,8 +335,14 @@ func (s *CommandService) handleMCPCall(ctx context.Context, msg IncomingMessage,
 	if err != nil {
 		return s.replyCommandFailure(ctx, msg, "调用工具失败", err)
 	}
-	_, err = s.send(ctx, msg, normalizeOutput(outcome.text))
-	return err
+	finalReceipt, err := s.send(ctx, msg, normalizeOutput(outcome.text))
+	if err != nil {
+		return err
+	}
+	if strings.EqualFold(tool, codexToolName) {
+		s.recordCodexThreadID(msg, finalReceipt, outcome.text)
+	}
+	return nil
 }
 
 func (s *CommandService) handleTopicFollowup(ctx context.Context, msg IncomingMessage, cleanText string, binding TopicBinding) error {
@@ -511,4 +538,106 @@ func chooseThreadID(candidates ...string) string {
 		}
 	}
 	return ""
+}
+
+func (s *CommandService) injectCodexThreadID(chatID, feishuThreadID string, args map[string]any) {
+	if args == nil {
+		return
+	}
+	if strings.TrimSpace(stringArg(args, "threadId")) != "" {
+		return
+	}
+
+	existing := s.lookupCodexThreadID(chatID, feishuThreadID)
+	if existing == "" {
+		return
+	}
+	args["threadId"] = existing
+}
+
+func (s *CommandService) lookupCodexThreadID(chatID, feishuThreadID string) string {
+	chatID = strings.TrimSpace(chatID)
+	feishuThreadID = strings.TrimSpace(feishuThreadID)
+	if chatID == "" || feishuThreadID == "" {
+		return ""
+	}
+
+	s.mcpCodexTopicMu.RLock()
+	threadID := strings.TrimSpace(s.mcpCodexTopicThreads[topicThreadKey(chatID, feishuThreadID)])
+	s.mcpCodexTopicMu.RUnlock()
+	if threadID != "" {
+		return threadID
+	}
+
+	if s.topicStore == nil {
+		return ""
+	}
+	binding, ok := s.topicStore.Get(chatID, feishuThreadID)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(binding.CodexThreadID)
+}
+
+func (s *CommandService) recordCodexThreadID(msg IncomingMessage, finalReceipt SendReceipt, output string) {
+	chatID := strings.TrimSpace(msg.ChatID)
+	feishuThreadID := chooseThreadID(msg.ThreadID, finalReceipt.ThreadID)
+	codexThreadID := strings.TrimSpace(parseCodexThreadID(output))
+	if chatID == "" || feishuThreadID == "" || codexThreadID == "" {
+		return
+	}
+
+	s.mcpCodexTopicMu.Lock()
+	s.mcpCodexTopicThreads[topicThreadKey(chatID, feishuThreadID)] = codexThreadID
+	s.mcpCodexTopicMu.Unlock()
+
+	if s.topicStore == nil {
+		return
+	}
+
+	projectAlias := mcpCodexTopicAlias
+	binding, ok := s.topicStore.Get(chatID, feishuThreadID)
+	if ok && strings.TrimSpace(binding.ProjectAlias) != "" {
+		projectAlias = strings.TrimSpace(binding.ProjectAlias)
+	}
+	_ = s.topicStore.Upsert(TopicBinding{
+		ChatID:         chatID,
+		FeishuThreadID: feishuThreadID,
+		ProjectAlias:   projectAlias,
+		CodexThreadID:  codexThreadID,
+	})
+}
+
+func parseCodexThreadID(output string) string {
+	matches := codexThreadIDPattern.FindStringSubmatch(output)
+	if len(matches) != 2 {
+		return ""
+	}
+	return strings.TrimSpace(matches[1])
+}
+
+func topicThreadKey(chatID, feishuThreadID string) string {
+	return strings.TrimSpace(chatID) + "::" + strings.TrimSpace(feishuThreadID)
+}
+
+func stringArg(args map[string]any, key string) string {
+	raw, ok := args[key]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch value := raw.(type) {
+	case string:
+		return value
+	default:
+		return ""
+	}
+}
+
+func (s *CommandService) bindingSupportsProjectFollowup(binding TopicBinding) bool {
+	alias := strings.ToLower(strings.TrimSpace(binding.ProjectAlias))
+	if alias == "" || alias == mcpCodexTopicAlias {
+		return false
+	}
+	cwd := strings.TrimSpace(s.cfg.ProjectAliasCWD[alias])
+	return cwd != ""
 }

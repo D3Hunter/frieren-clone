@@ -10,12 +10,14 @@ import (
 )
 
 type fakeMessageService struct {
-	last service.IncomingMessage
-	err  error
+	last  service.IncomingMessage
+	calls int
+	err   error
 }
 
 func (f *fakeMessageService) HandleIncomingMessage(ctx context.Context, msg service.IncomingMessage) error {
 	f.last = msg
+	f.calls++
 	return f.err
 }
 
@@ -62,6 +64,23 @@ func TestHandleEvent_ParsesMentionsAndThread(t *testing.T) {
 	}
 	if len(svc.last.MentionedIDs) != 1 || svc.last.MentionedIDs[0] != "ou_bot" {
 		t.Fatalf("unexpected mentioned ids: %+v", svc.last.MentionedIDs)
+	}
+}
+
+func TestHandleEvent_DeduplicatesSameMessageID(t *testing.T) {
+	svc := &fakeMessageService{}
+	h := NewMessageHandler(svc, true)
+
+	event := newEvent("text", `{"text":"hello"}`, "oc_x", "user", nil, "")
+	if err := h.HandleEvent(context.Background(), event); err != nil {
+		t.Fatalf("first HandleEvent error: %v", err)
+	}
+	if err := h.HandleEvent(context.Background(), event); err != nil {
+		t.Fatalf("second HandleEvent error: %v", err)
+	}
+
+	if svc.calls != 1 {
+		t.Fatalf("expected one service call after duplicate events, got %d", svc.calls)
 	}
 }
 
