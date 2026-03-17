@@ -62,6 +62,12 @@ func TestHandleEvent_ParsesMentionsAndThread(t *testing.T) {
 	if svc.last.ThreadID != "omt_topic" {
 		t.Fatalf("unexpected thread id: %q", svc.last.ThreadID)
 	}
+	if svc.last.RequestID != "req_om_x" {
+		t.Fatalf("unexpected request id: %q", svc.last.RequestID)
+	}
+	if svc.last.CorrelationID != "corr_oc_x_omt_topic" {
+		t.Fatalf("unexpected correlation id: %q", svc.last.CorrelationID)
+	}
 	if len(svc.last.MentionedIDs) != 1 || svc.last.MentionedIDs[0] != "ou_bot" {
 		t.Fatalf("unexpected mentioned ids: %+v", svc.last.MentionedIDs)
 	}

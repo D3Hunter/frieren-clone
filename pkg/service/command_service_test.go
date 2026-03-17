@@ -7,6 +7,10 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 type fakeMCPGateway struct {
@@ -319,6 +323,90 @@ func TestHandleIncomingMessage_HelpCommand(t *testing.T) {
 	}
 }
 
+func TestHandleIncomingMessage_LogsIncomingAndOutgoingMessageDetails(t *testing.T) {
+	core, observed := observer.New(zapcore.InfoLevel)
+	logger := zap.New(core)
+
+	sender := &fakeMessageSender{}
+	svc := NewCommandService(CommandServiceDeps{
+		MCP:        &fakeMCPGateway{},
+		Codex:      &fakeCodexGateway{},
+		Sender:     sender,
+		TopicStore: newFakeTopicStore(),
+		Logger:     logger,
+		Config:     CommandServiceConfig{BotOpenID: "ou_bot", Heartbeat: time.Hour},
+	})
+
+	err := svc.HandleIncomingMessage(context.Background(), IncomingMessage{
+		ChatID:       "oc_chat",
+		ThreadID:     "omt_topic",
+		ChatType:     "group",
+		MessageID:    "om_1",
+		RawText:      `<at user_id="ou_bot"></at> /help`,
+		MentionedIDs: []string{"ou_bot"},
+	})
+	if err != nil {
+		t.Fatalf("HandleIncomingMessage error: %v", err)
+	}
+
+	var incomingLogged bool
+	var outgoingLogged bool
+	for _, entry := range observed.All() {
+		fields := entry.ContextMap()
+		switch entry.Message {
+		case "incoming feishu message":
+			incomingLogged = true
+			if fields["chat_id"] != "oc_chat" {
+				t.Fatalf("incoming log missing chat_id: %+v", fields)
+			}
+			if fields["message_id"] != "om_1" {
+				t.Fatalf("incoming log missing message_id: %+v", fields)
+			}
+			if fields["thread_id"] != "omt_topic" {
+				t.Fatalf("incoming log missing thread_id: %+v", fields)
+			}
+			if fields["topic_id"] != "omt_topic" {
+				t.Fatalf("incoming log missing topic_id: %+v", fields)
+			}
+			if fields["request_id"] != "req_om_1" {
+				t.Fatalf("incoming log missing request_id: %+v", fields)
+			}
+			if fields["correlation_id"] != "corr_oc_chat_omt_topic" {
+				t.Fatalf("incoming log missing correlation_id: %+v", fields)
+			}
+		case "outgoing feishu response":
+			outgoingLogged = true
+			if fields["chat_id"] != "oc_chat" {
+				t.Fatalf("outgoing log missing chat_id: %+v", fields)
+			}
+			if fields["reply_to_message_id"] != "om_1" {
+				t.Fatalf("outgoing log missing reply_to_message_id: %+v", fields)
+			}
+			if fields["thread_id"] != "omt_topic" {
+				t.Fatalf("outgoing log missing thread_id: %+v", fields)
+			}
+			if fields["topic_id"] != "omt_topic" {
+				t.Fatalf("outgoing log missing topic_id: %+v", fields)
+			}
+			if fields["request_id"] != "req_om_1" {
+				t.Fatalf("outgoing log missing request_id: %+v", fields)
+			}
+			if fields["correlation_id"] != "corr_oc_chat_omt_topic" {
+				t.Fatalf("outgoing log missing correlation_id: %+v", fields)
+			}
+			if !strings.Contains(fields["text"].(string), "/mcp tools") {
+				t.Fatalf("outgoing log missing response text: %+v", fields)
+			}
+		}
+	}
+	if !incomingLogged {
+		t.Fatal("expected incoming message log")
+	}
+	if !outgoingLogged {
+		t.Fatal("expected outgoing response log")
+	}
+}
+
 func TestHandleIncomingMessage_GroupCommandRequiresMention(t *testing.T) {
 	sender := &fakeMessageSender{}
 	svc := NewCommandService(CommandServiceDeps{
@@ -473,6 +561,9 @@ func TestHandleIncomingMessage_MCPCallInvalidJSON(t *testing.T) {
 	if !strings.Contains(sender.messages[len(sender.messages)-1].Text, "JSON") {
 		t.Fatalf("expected json error message, got %q", sender.messages[len(sender.messages)-1].Text)
 	}
+	if !strings.Contains(sender.messages[len(sender.messages)-1].Text, "诊断ID") {
+		t.Fatalf("expected diagnostic id in json error message, got %q", sender.messages[len(sender.messages)-1].Text)
+	}
 }
 
 func TestHandleIncomingMessage_MCPCallToolErrorIsHandledWithoutPropagation(t *testing.T) {
@@ -509,6 +600,9 @@ func TestHandleIncomingMessage_MCPCallToolErrorIsHandledWithoutPropagation(t *te
 	}
 	if !strings.Contains(sender.messages[0].Text, "调用工具失败") {
 		t.Fatalf("expected tool failure message, got %q", sender.messages[0].Text)
+	}
+	if !strings.Contains(sender.messages[0].Text, "诊断ID") {
+		t.Fatalf("expected diagnostic id in failure message, got %q", sender.messages[0].Text)
 	}
 }
 
@@ -681,6 +775,9 @@ func TestHandleIncomingMessage_DependencyErrorsReplyToUserWithoutPropagation(t *
 	}
 	if !strings.Contains(sender.messages[0].Text, "执行失败") {
 		t.Fatalf("expected execution failure message, got %q", sender.messages[0].Text)
+	}
+	if !strings.Contains(sender.messages[0].Text, "诊断ID") {
+		t.Fatalf("expected diagnostic id in execution failure message, got %q", sender.messages[0].Text)
 	}
 }
 

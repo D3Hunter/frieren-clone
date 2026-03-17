@@ -129,6 +129,7 @@ func main() {
 		Codex:      codex.NewRunner(),
 		Sender:     messageSenderAdapter{sender: textSender},
 		TopicStore: topicStoreAdapter{store: topicStore},
+		Logger:     logger.Named("service"),
 		Config: service.CommandServiceConfig{
 			BotOpenID:               cfg.Commands.BotOpenID,
 			Heartbeat:               time.Duration(cfg.Commands.HeartbeatSec) * time.Second,
@@ -136,7 +137,7 @@ func main() {
 			ProjectAliasCWD:         projectAliasCWD,
 		},
 	})
-	messageHandler := handler.NewMessageHandler(commandService, cfg.Message.IgnoreBotMessages)
+	messageHandler := handler.NewMessageHandler(commandService, cfg.Message.IgnoreBotMessages, logger.Named("handler"))
 
 	wsClient := feishu.NewWSClient(*cfg, messageHandler.HandleEvent, logger)
 
