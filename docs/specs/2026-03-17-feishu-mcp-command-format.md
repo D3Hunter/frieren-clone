@@ -26,6 +26,9 @@ The command set is:
 Behavior notes:
 
 - `/mcp call` currently accepts only a JSON object payload.
+- `/mcp call codex` is treated as a fresh-run command and starts a new Codex thread each time.
+- Rationale: this is intentional so one Feishu topic can host multiple independent Codex threads when users want parallel or reset investigations.
+- `/help` includes a one-line reminder of this `/mcp call codex` new-thread behavior.
 - Unknown commands fall back to concise help.
 - Unknown project alias returns `未知项目别名：<alias>`.
 
