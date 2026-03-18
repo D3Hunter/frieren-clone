@@ -168,6 +168,17 @@ Uses MCP `codex-reply` tool:
 
 Final visible message is taken from MCP tool textual output; thread id is parsed from output JSON fragment when present, otherwise previous bound id is retained.
 
+For every successful Codex execution response (`codex` or `codex-reply`), service also calls MCP `codex-status` with:
+
+- `threadId=<resolved_codex_thread_id>`
+
+When `codex-status` returns parseable context window usage, final footer includes:
+
+- `context_window: <usedK> / <maxK> tokens used (<left%> left)`
+- `codex_thread_id: <thread_id>`
+
+If `codex-status` is unavailable or its output is not parseable, reply still includes `codex_thread_id` footer and skips `context_window`.
+
 If follow-up `codex-reply` returns session-not-found (for example, after MCP session idle-timeout rotation):
 
 - bot first posts a topic notice explaining this follow-up will run in a new Codex session,
@@ -215,6 +226,10 @@ Implemented in `pkg/sender/text_sender.go` and service heartbeat flow.
 - Reply API uses `reply_in_thread=true` to keep same topic chain behavior.
 - Content mode selection:
   - always uses `text` to avoid extra post title rendering (for example bold `Frieren` title).
+- Codex footer formatting:
+  - appends thread metadata section at the bottom as plain text,
+  - includes `codex_thread_id`,
+  - includes `context_window` token usage line when `codex-status` succeeds and usage can be parsed.
 - Long output splitting:
   - chunk at 1800 runes,
   - each chunk prefixed with `[i/n]`.
