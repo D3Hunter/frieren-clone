@@ -2,6 +2,8 @@ package logging
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"go.uber.org/zap"
@@ -17,8 +19,9 @@ const (
 
 // Options controls logger level and encoding format.
 type Options struct {
-	Level  string
-	Format string
+	Level      string
+	Format     string
+	OutputPath string
 }
 
 // New creates a configured zap logger using normalized format and validated level.
@@ -33,13 +36,17 @@ func New(options Options) (*zap.Logger, error) {
 	if format == FormatJSON {
 		encoding = "json"
 	}
+	outputPath, errorOutputPath, err := normalizeOutputPath(options.OutputPath)
+	if err != nil {
+		return nil, err
+	}
 
 	cfg := zap.Config{
 		Level:            zap.NewAtomicLevelAt(level),
 		Development:      false,
 		Encoding:         encoding,
-		OutputPaths:      []string{"stdout"},
-		ErrorOutputPaths: []string{"stderr"},
+		OutputPaths:      []string{outputPath},
+		ErrorOutputPaths: []string{errorOutputPath},
 		EncoderConfig: zapcore.EncoderConfig{
 			TimeKey:        "ts",
 			LevelKey:       "level",
@@ -56,6 +63,26 @@ func New(options Options) (*zap.Logger, error) {
 	}
 
 	return cfg.Build()
+}
+
+func normalizeOutputPath(outputPath string) (string, string, error) {
+	trimmedOutputPath := strings.TrimSpace(outputPath)
+	if trimmedOutputPath == "" {
+		trimmedOutputPath = filepath.Join("logs", "frieren.log")
+	}
+	switch trimmedOutputPath {
+	case "stdout":
+		return "stdout", "stderr", nil
+	case "stderr":
+		return "stderr", "stderr", nil
+	}
+	outputDir := filepath.Dir(trimmedOutputPath)
+	if outputDir != "." && outputDir != "" {
+		if err := os.MkdirAll(outputDir, 0o755); err != nil {
+			return "", "", fmt.Errorf("create log directory %q: %w", outputDir, err)
+		}
+	}
+	return trimmedOutputPath, trimmedOutputPath, nil
 }
 
 func normalizeFormat(format string) string {

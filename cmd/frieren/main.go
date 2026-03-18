@@ -109,8 +109,9 @@ func main() {
 	}
 
 	logger, err := logging.New(logging.Options{
-		Level:  cfg.Logging.Level,
-		Format: cfg.Logging.Format,
+		Level:      cfg.Logging.Level,
+		Format:     cfg.Logging.Format,
+		OutputPath: cfg.Logging.Path,
 	})
 	if err != nil {
 		log.Fatalf("init logger: %v", err)

@@ -50,6 +50,7 @@ type MessageConfig struct {
 type LoggingConfig struct {
 	Level  string `toml:"level"`
 	Format string `toml:"format"`
+	Path   string `toml:"path"`
 }
 
 // MCPConfig controls endpoint and timeout for MCP command calls.
@@ -90,6 +91,7 @@ func defaultConfig() Config {
 		Logging: LoggingConfig{
 			Level:  "info",
 			Format: "text",
+			Path:   filepath.Join("logs", "frieren.log"),
 		},
 		MCP: MCPConfig{
 			Endpoint:   defaultMCPEndpoint,
@@ -128,6 +130,10 @@ func (c *Config) Validate() error {
 	c.Logging.Format = strings.ToLower(strings.TrimSpace(c.Logging.Format))
 	if c.Logging.Format == "" {
 		c.Logging.Format = "text"
+	}
+	c.Logging.Path = strings.TrimSpace(c.Logging.Path)
+	if c.Logging.Path == "" {
+		c.Logging.Path = filepath.Join("logs", "frieren.log")
 	}
 	if c.Message.DefaultReply == "" {
 		c.Message.DefaultReply = defaultReply
