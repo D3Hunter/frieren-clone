@@ -81,6 +81,9 @@ func TestLoadFromBytes_AppliesMCPAndCommandDefaults(t *testing.T) {
 	if cfg.Logging.Format != "text" {
 		t.Fatalf("expected default logging format text, got %q", cfg.Logging.Format)
 	}
+	if cfg.Logging.Path != "logs/frieren.log" {
+		t.Fatalf("expected default logging path logs/frieren.log, got %q", cfg.Logging.Path)
+	}
 }
 
 func TestLoadFromBytes_RejectsEmptyProjectCWD(t *testing.T) {

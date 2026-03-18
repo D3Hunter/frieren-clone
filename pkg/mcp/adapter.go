@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -16,15 +17,30 @@ type ToolInfo struct {
 	Description string
 }
 
-// Gateway wraps short-lived MCP client sessions for list/schema/call operations.
+// Gateway wraps a reusable MCP client session for list/schema/call operations.
 type Gateway struct {
-	endpoint string
-	timeout  time.Duration
+	endpoint           string
+	timeout            time.Duration
+	sessionIdleTimeout time.Duration
+	mu                 sync.Mutex
+	session            *sdk.ClientSession
+	sessionLastUsedAt  time.Time
 }
 
 // NewGateway builds a Gateway for the given streamable MCP endpoint and call timeout.
 func NewGateway(endpoint string, timeout time.Duration) *Gateway {
-	return &Gateway{endpoint: strings.TrimSpace(endpoint), timeout: timeout}
+	return &Gateway{
+		endpoint:           strings.TrimSpace(endpoint),
+		timeout:            timeout,
+		sessionIdleTimeout: time.Hour,
+	}
+}
+
+// Close closes the active MCP client session, if any.
+func (g *Gateway) Close() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.closeSessionLocked()
 }
 
 // ListTools lists all MCP tools by paging through the server cursor until completion.
@@ -74,7 +90,7 @@ func (g *Gateway) CallTool(ctx context.Context, tool string, args map[string]any
 	}
 
 	var output string
-	err := g.withSession(ctx, func(callCtx context.Context, session *sdk.ClientSession) error {
+	err := g.withSessionWithTimeout(ctx, g.timeoutForTool(tool), func(callCtx context.Context, session *sdk.ClientSession) error {
 		result, err := session.CallTool(callCtx, &sdk.CallToolParams{
 			Name:      tool,
 			Arguments: args,
@@ -119,27 +135,92 @@ func (g *Gateway) fetchTools(ctx context.Context) ([]*sdk.Tool, error) {
 }
 
 func (g *Gateway) withSession(ctx context.Context, fn func(context.Context, *sdk.ClientSession) error) error {
+	return g.withSessionWithTimeout(ctx, g.timeout, fn)
+}
+
+func (g *Gateway) withSessionWithTimeout(ctx context.Context, timeout time.Duration, fn func(context.Context, *sdk.ClientSession) error) error {
 	if strings.TrimSpace(g.endpoint) == "" {
 		return fmt.Errorf("mcp endpoint is required")
 	}
 	callCtx := ctx
 	cancel := func() {}
-	if g.timeout > 0 {
-		callCtx, cancel = context.WithTimeout(ctx, g.timeout)
+	if timeout > 0 {
+		callCtx, cancel = context.WithTimeout(ctx, timeout)
 	}
 	defer cancel()
 
-	client := sdk.NewClient(&sdk.Implementation{Name: "frieren-clone", Version: "1.0.0"}, nil)
-	session, err := client.Connect(callCtx, &sdk.StreamableClientTransport{Endpoint: g.endpoint}, nil)
-	if err != nil {
-		return fmt.Errorf("connect mcp endpoint %q: %w", g.endpoint, err)
-	}
-	defer session.Close()
+	g.mu.Lock()
+	defer g.mu.Unlock()
 
+	if err := g.closeExpiredSessionLocked(time.Now()); err != nil {
+		return err
+	}
+	session, err := g.ensureSessionLocked(callCtx)
+	if err != nil {
+		return err
+	}
+	g.sessionLastUsedAt = time.Now()
 	if err := fn(callCtx, session); err != nil {
 		return err
 	}
+	g.sessionLastUsedAt = time.Now()
 	return nil
+}
+
+func (g *Gateway) ensureSessionLocked(ctx context.Context) (*sdk.ClientSession, error) {
+	if g.session != nil {
+		return g.session, nil
+	}
+	client := sdk.NewClient(&sdk.Implementation{Name: "frieren-clone", Version: "1.0.0"}, nil)
+	session, err := client.Connect(ctx, &sdk.StreamableClientTransport{Endpoint: g.endpoint}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("connect mcp endpoint %q: %w", g.endpoint, err)
+	}
+	g.session = session
+	g.sessionLastUsedAt = time.Now()
+	return g.session, nil
+}
+
+func (g *Gateway) closeSessionLocked() error {
+	if g.session == nil {
+		return nil
+	}
+	err := g.session.Close()
+	g.session = nil
+	g.sessionLastUsedAt = time.Time{}
+	return err
+}
+
+func (g *Gateway) closeExpiredSessionLocked(now time.Time) error {
+	if g.session == nil {
+		return nil
+	}
+	if g.sessionIdleTimeout <= 0 {
+		return nil
+	}
+	lastUsedAt := g.sessionLastUsedAt
+	if lastUsedAt.IsZero() {
+		return nil
+	}
+	if now.Sub(lastUsedAt) < g.sessionIdleTimeout {
+		return nil
+	}
+	if err := g.closeSessionLocked(); err != nil {
+		return fmt.Errorf("close expired mcp session: %w", err)
+	}
+	return nil
+}
+
+func (g *Gateway) timeoutForTool(tool string) time.Duration {
+	if isCodexExecutionTool(tool) {
+		return 0
+	}
+	return g.timeout
+}
+
+func isCodexExecutionTool(tool string) bool {
+	tool = strings.ToLower(strings.TrimSpace(tool))
+	return tool == "codex" || tool == "codex-reply"
 }
 
 func renderCallToolResult(result *sdk.CallToolResult) string {

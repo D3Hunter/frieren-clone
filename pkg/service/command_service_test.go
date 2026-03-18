@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ type fakeMCPGateway struct {
 	callText   string
 	callTexts  []string
 	callErr    error
+	callErrs   []error
 	callDelay  time.Duration
 	calledWith struct {
 		tool string
@@ -55,6 +57,13 @@ func (f *fakeMCPGateway) CallTool(ctx context.Context, tool string, args map[str
 		tool string
 		args map[string]any
 	}{tool: tool, args: clonedArgs})
+	if len(f.callErrs) > 0 {
+		nextErr := f.callErrs[0]
+		f.callErrs = f.callErrs[1:]
+		if nextErr != nil {
+			return "", nextErr
+		}
+	}
 	if f.callErr != nil {
 		return "", f.callErr
 	}
@@ -488,6 +497,57 @@ func TestHandleIncomingMessage_ProjectCommandBindsTopic(t *testing.T) {
 	}
 }
 
+func TestHandleIncomingMessage_ProjectCommandFormatsCodexOutputForFeishuText(t *testing.T) {
+	content := "`DXF` is **distributed task framework**.\n\n- [`pkg/dxf/framework/doc.go:17`](/Users/jujiajia/code/pingcap/tidb/pkg/dxf/framework/doc.go:17)"
+	encodedPayload, err := json.MarshalIndent(map[string]string{
+		"content":  content,
+		"threadId": "codex_t1",
+	}, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	sender := &fakeMessageSender{}
+	mcp := &fakeMCPGateway{callText: content + "\n" + string(encodedPayload)}
+	svc := NewCommandService(CommandServiceDeps{
+		MCP:        mcp,
+		Sender:     sender,
+		TopicStore: newFakeTopicStore(),
+		Config: CommandServiceConfig{
+			BotOpenID:       "ou_bot",
+			Heartbeat:       time.Hour,
+			ProjectAliasCWD: map[string]string{"tidb": "/work/tidb"},
+		},
+	})
+
+	err = svc.HandleIncomingMessage(context.Background(), IncomingMessage{
+		ChatID:       "oc_chat",
+		ChatType:     "group",
+		MessageID:    "om_1",
+		RawText:      "<at user_id=\"ou_bot\"></at> /tidb explain dxf",
+		MentionedIDs: []string{"ou_bot"},
+	})
+	if err != nil {
+		t.Fatalf("HandleIncomingMessage error: %v", err)
+	}
+	if len(sender.messages) == 0 {
+		t.Fatal("expected at least one response message")
+	}
+	got := sender.messages[len(sender.messages)-1].Text
+	if strings.Contains(got, `"threadId"`) || strings.Contains(got, `"content"`) {
+		t.Fatalf("expected structured payload hidden from user message, got %q", got)
+	}
+	if !strings.Contains(got, "`DXF`") || !strings.Contains(got, "**distributed task framework**") {
+		t.Fatalf("expected markdown syntax preserved for rich rendering sender, got %q", got)
+	}
+	if !strings.Contains(got, "线程信息：") {
+		t.Fatalf("expected thread info section, got %q", got)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(got), "codex_thread_id: codex_t1") {
+		t.Fatalf("expected thread id in bottom section, got %q", got)
+	}
+}
+
 func TestHandleIncomingMessage_TopicFollowupUsesBoundThread(t *testing.T) {
 	topicStore := newFakeTopicStore()
 	if err := topicStore.Upsert(TopicBinding{
@@ -530,6 +590,82 @@ func TestHandleIncomingMessage_TopicFollowupUsesBoundThread(t *testing.T) {
 	}
 	if gotThreadID := mcp.callHistory[0].args["threadId"]; gotThreadID != "codex_abc" {
 		t.Fatalf("unexpected codex thread id arg: %#v", gotThreadID)
+	}
+}
+
+func TestHandleIncomingMessage_TopicFollowupSessionTimeoutNotifiesAndStartsNewThread(t *testing.T) {
+	topicStore := newFakeTopicStore()
+	if err := topicStore.Upsert(TopicBinding{
+		ChatID:         "oc_chat",
+		FeishuThreadID: "omt_thread",
+		ProjectAlias:   "tidb",
+		CodexThreadID:  "codex_old",
+	}); err != nil {
+		t.Fatalf("seed topic store: %v", err)
+	}
+
+	mcp := &fakeMCPGateway{
+		callErrs: []error{
+			errors.New(`tool "codex-reply" returned error: Session not found for thread_id: codex_old`),
+			nil,
+		},
+		callText: "new session output\n{\"threadId\":\"codex_new\"}",
+	}
+	sender := &fakeMessageSender{}
+	svc := NewCommandService(CommandServiceDeps{
+		MCP:        mcp,
+		Sender:     sender,
+		TopicStore: topicStore,
+		Config: CommandServiceConfig{
+			BotOpenID:       "ou_bot",
+			Heartbeat:       time.Hour,
+			ProjectAliasCWD: map[string]string{"tidb": "/work/tidb"},
+		},
+	})
+
+	err := svc.HandleIncomingMessage(context.Background(), IncomingMessage{
+		ChatID:    "oc_chat",
+		ThreadID:  "omt_thread",
+		ChatType:  "group",
+		MessageID: "om_2",
+		RawText:   "继续刚才的话题",
+	})
+	if err != nil {
+		t.Fatalf("HandleIncomingMessage error: %v", err)
+	}
+	if len(mcp.callHistory) != 2 {
+		t.Fatalf("expected two mcp calls, got %d", len(mcp.callHistory))
+	}
+	if mcp.callHistory[0].tool != "codex-reply" {
+		t.Fatalf("first call should be codex-reply, got %q", mcp.callHistory[0].tool)
+	}
+	if got := mcp.callHistory[0].args["threadId"]; got != "codex_old" {
+		t.Fatalf("first call should use codex_old thread, got %#v", got)
+	}
+	if mcp.callHistory[1].tool != "codex" {
+		t.Fatalf("second call should be codex, got %q", mcp.callHistory[1].tool)
+	}
+	if got := mcp.callHistory[1].args["cwd"]; got != "/work/tidb" {
+		t.Fatalf("second call should include project cwd, got %#v", got)
+	}
+	if len(sender.messages) != 2 {
+		t.Fatalf("expected session-reset notice and final response, got %d messages", len(sender.messages))
+	}
+	if !strings.Contains(sender.messages[0].Text, "会话已过期") {
+		t.Fatalf("expected first message to mention session expiration, got %q", sender.messages[0].Text)
+	}
+	if !strings.Contains(sender.messages[0].Text, "codex_old") {
+		t.Fatalf("expected first message to include previous codex thread id, got %q", sender.messages[0].Text)
+	}
+	if !strings.Contains(sender.messages[0].Text, "tidb") {
+		t.Fatalf("expected first message to include project alias, got %q", sender.messages[0].Text)
+	}
+	binding, ok := topicStore.Get("oc_chat", "omt_thread")
+	if !ok {
+		t.Fatal("expected refreshed topic binding")
+	}
+	if binding.CodexThreadID != "codex_new" {
+		t.Fatalf("expected refreshed codex thread id, got %q", binding.CodexThreadID)
 	}
 }
 
