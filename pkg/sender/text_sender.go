@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -12,6 +13,8 @@ import (
 )
 
 const defaultMaxChunkRunes = 1800
+
+var markdownBulletPattern = regexp.MustCompile(`(?m)^\s*[-*+]\s+`)
 
 type messageAPI interface {
 	// Create sends a new chat message using Feishu's create-message API.
@@ -192,17 +195,69 @@ func (s *TextSender) sendOne(ctx context.Context, chatID, replyToMessageID, msgT
 }
 
 func selectMsgType(text string) string {
-	_ = text
+	if shouldUseInteractiveMarkdown(text) {
+		return "interactive"
+	}
 	return "text"
 }
 
 func buildContent(msgType, text string) (string, error) {
-	_ = msgType
+	if msgType == "interactive" {
+		text = normalizeLarkMarkdown(text)
+		encoded, err := json.Marshal(map[string]any{
+			"config": map[string]any{
+				"wide_screen_mode": true,
+			},
+			"elements": []map[string]any{
+				{
+					"tag": "div",
+					"text": map[string]string{
+						"tag":     "lark_md",
+						"content": text,
+					},
+				},
+			},
+		})
+		if err != nil {
+			return "", fmt.Errorf("marshal interactive content: %w", err)
+		}
+		return string(encoded), nil
+	}
+
 	encoded, err := json.Marshal(map[string]string{"text": text})
 	if err != nil {
 		return "", fmt.Errorf("marshal text content: %w", err)
 	}
 	return string(encoded), nil
+}
+
+func shouldUseInteractiveMarkdown(text string) bool {
+	if strings.TrimSpace(text) == "" {
+		return false
+	}
+	if strings.Contains(text, "```") {
+		return true
+	}
+	if strings.Contains(text, "`") {
+		return true
+	}
+	if strings.Contains(text, "**") || strings.Contains(text, "__") {
+		return true
+	}
+	if strings.Contains(text, "](") && strings.Contains(text, "[") {
+		return true
+	}
+	if markdownBulletPattern.MatchString(text) {
+		return true
+	}
+	return false
+}
+
+func normalizeLarkMarkdown(text string) string {
+	if strings.TrimSpace(text) == "" {
+		return text
+	}
+	return strings.ReplaceAll(text, "\r\n", "\n")
 }
 
 func splitChunks(input string, maxRunes int) []string {

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -493,6 +494,57 @@ func TestHandleIncomingMessage_ProjectCommandBindsTopic(t *testing.T) {
 	}
 	if sender.reactions[0].EmojiType != "OnIt" {
 		t.Fatalf("expected OnIt reaction, got %q", sender.reactions[0].EmojiType)
+	}
+}
+
+func TestHandleIncomingMessage_ProjectCommandFormatsCodexOutputForFeishuText(t *testing.T) {
+	content := "`DXF` is **distributed task framework**.\n\n- [`pkg/dxf/framework/doc.go:17`](/Users/jujiajia/code/pingcap/tidb/pkg/dxf/framework/doc.go:17)"
+	encodedPayload, err := json.MarshalIndent(map[string]string{
+		"content":  content,
+		"threadId": "codex_t1",
+	}, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	sender := &fakeMessageSender{}
+	mcp := &fakeMCPGateway{callText: content + "\n" + string(encodedPayload)}
+	svc := NewCommandService(CommandServiceDeps{
+		MCP:        mcp,
+		Sender:     sender,
+		TopicStore: newFakeTopicStore(),
+		Config: CommandServiceConfig{
+			BotOpenID:       "ou_bot",
+			Heartbeat:       time.Hour,
+			ProjectAliasCWD: map[string]string{"tidb": "/work/tidb"},
+		},
+	})
+
+	err = svc.HandleIncomingMessage(context.Background(), IncomingMessage{
+		ChatID:       "oc_chat",
+		ChatType:     "group",
+		MessageID:    "om_1",
+		RawText:      "<at user_id=\"ou_bot\"></at> /tidb explain dxf",
+		MentionedIDs: []string{"ou_bot"},
+	})
+	if err != nil {
+		t.Fatalf("HandleIncomingMessage error: %v", err)
+	}
+	if len(sender.messages) == 0 {
+		t.Fatal("expected at least one response message")
+	}
+	got := sender.messages[len(sender.messages)-1].Text
+	if strings.Contains(got, `"threadId"`) || strings.Contains(got, `"content"`) {
+		t.Fatalf("expected structured payload hidden from user message, got %q", got)
+	}
+	if !strings.Contains(got, "`DXF`") || !strings.Contains(got, "**distributed task framework**") {
+		t.Fatalf("expected markdown syntax preserved for rich rendering sender, got %q", got)
+	}
+	if !strings.Contains(got, "线程信息：") {
+		t.Fatalf("expected thread info section, got %q", got)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(got), "codex_thread_id: codex_t1") {
+		t.Fatalf("expected thread id in bottom section, got %q", got)
 	}
 }
 

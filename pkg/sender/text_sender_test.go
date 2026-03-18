@@ -104,7 +104,7 @@ func TestSend_UsesTextForShortPlainText(t *testing.T) {
 	}
 }
 
-func TestSend_UsesTextForMarkdownAndCode(t *testing.T) {
+func TestSend_UsesInteractiveForMarkdownAndCode(t *testing.T) {
 	api := &fakeMessageAPI{}
 	s := NewTextSender(api, &fakeReactionAPI{})
 
@@ -115,8 +115,27 @@ func TestSend_UsesTextForMarkdownAndCode(t *testing.T) {
 	if len(api.replyReqs) != 1 {
 		t.Fatalf("expected one reply request, got %d", len(api.replyReqs))
 	}
-	if api.replyReqs[0].Body.MsgType == nil || *api.replyReqs[0].Body.MsgType != "text" {
-		t.Fatalf("expected text msg type, got %+v", api.replyReqs[0].Body.MsgType)
+	if api.replyReqs[0].Body.MsgType == nil || *api.replyReqs[0].Body.MsgType != "interactive" {
+		t.Fatalf("expected interactive msg type, got %+v", api.replyReqs[0].Body.MsgType)
+	}
+	if api.replyReqs[0].Body.Content == nil {
+		t.Fatal("expected card content")
+	}
+	if !strings.Contains(*api.replyReqs[0].Body.Content, "\"tag\":\"lark_md\"") {
+		t.Fatalf("expected lark_md card content, got %s", *api.replyReqs[0].Body.Content)
+	}
+}
+
+func TestBuildContent_InteractivePreservesMarkdownListMarkers(t *testing.T) {
+	content, err := buildContent("interactive", "- first\n- second\n\n**bold**")
+	if err != nil {
+		t.Fatalf("buildContent error: %v", err)
+	}
+	if !strings.Contains(content, "- first") || !strings.Contains(content, "- second") {
+		t.Fatalf("expected markdown list markers preserved, got %s", content)
+	}
+	if !strings.Contains(content, "**bold**") {
+		t.Fatalf("expected markdown emphasis preserved, got %s", content)
 	}
 }
 

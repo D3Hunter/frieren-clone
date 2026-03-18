@@ -315,7 +315,7 @@ func (s *CommandService) handleSlashCommand(ctx context.Context, msg IncomingMes
 		if err != nil {
 			return s.replyCommandFailure(ctx, msg, "执行失败", err)
 		}
-		finalReceipt, err := s.send(ctx, msg, normalizeOutput(outcome.text))
+		finalReceipt, err := s.send(ctx, msg, formatCodexOutput(outcome.text, outcome.codexThreadID))
 		if err != nil {
 			return err
 		}
@@ -408,7 +408,7 @@ func (s *CommandService) handleMCPCall(ctx context.Context, msg IncomingMessage,
 	}
 	responseText := normalizeOutput(outcome.text)
 	if strings.EqualFold(tool, codexToolName) {
-		responseText = appendTextNotice(responseText, codexNewThreadNotice)
+		responseText = formatCodexOutput(outcome.text, outcome.codexThreadID, codexNewThreadNotice)
 	}
 	finalReceipt, err := s.send(ctx, msg, responseText)
 	if err != nil {
@@ -467,7 +467,7 @@ func (s *CommandService) handleTopicFollowup(ctx context.Context, msg IncomingMe
 			return s.replyCommandFailure(ctx, msg, "执行失败", err)
 		}
 	}
-	finalReceipt, err := s.send(ctx, msg, normalizeOutput(outcome.text))
+	finalReceipt, err := s.send(ctx, msg, formatCodexOutput(outcome.text, outcome.codexThreadID))
 	if err != nil {
 		return err
 	}
@@ -694,6 +694,75 @@ func normalizeOutput(output string) string {
 	return output
 }
 
+func formatCodexOutput(output, codexThreadID string, notices ...string) string {
+	body := strings.TrimSpace(output)
+	if content, extractedThreadID, ok := extractCodexStructuredPayload(output); ok {
+		if strings.TrimSpace(content) != "" {
+			body = content
+		}
+		if strings.TrimSpace(codexThreadID) == "" {
+			codexThreadID = extractedThreadID
+		}
+	}
+	body = normalizeOutput(body)
+	for _, notice := range notices {
+		body = appendTextNotice(body, notice)
+	}
+	codexThreadID = strings.TrimSpace(codexThreadID)
+	if codexThreadID != "" {
+		body = appendTextNotice(body, fmt.Sprintf("线程信息：\ncodex_thread_id: %s", codexThreadID))
+	}
+	return normalizeOutput(body)
+}
+
+func extractCodexStructuredPayload(output string) (content string, threadID string, ok bool) {
+	trimmed := strings.TrimSpace(output)
+	if trimmed == "" {
+		return "", "", false
+	}
+
+	start := strings.LastIndex(trimmed, "\n{")
+	if start >= 0 {
+		start++
+	} else if strings.HasPrefix(trimmed, "{") {
+		start = 0
+	} else {
+		return "", "", false
+	}
+
+	payloadRaw := strings.TrimSpace(trimmed[start:])
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(payloadRaw), &payload); err != nil {
+		return "", "", false
+	}
+
+	content = strings.TrimSpace(stringMapValue(payload, "content"))
+	threadID = strings.TrimSpace(stringMapValue(payload, "threadId", "thread_id"))
+	if content == "" && threadID == "" {
+		return "", "", false
+	}
+	if content == "" {
+		content = strings.TrimSpace(trimmed[:start])
+	}
+	return content, threadID, true
+}
+
+func stringMapValue(payload map[string]any, keys ...string) string {
+	for _, key := range keys {
+		value, ok := payload[key]
+		if !ok || value == nil {
+			continue
+		}
+		if typed, ok := value.(string); ok {
+			typed = strings.TrimSpace(typed)
+			if typed != "" {
+				return typed
+			}
+		}
+	}
+	return ""
+}
+
 func appendTextNotice(text, notice string) string {
 	text = strings.TrimSpace(text)
 	notice = strings.TrimSpace(notice)
@@ -794,10 +863,14 @@ func (s *CommandService) recordCodexThreadID(msg IncomingMessage, finalReceipt S
 
 func parseCodexThreadID(output string) string {
 	matches := codexThreadIDPattern.FindStringSubmatch(output)
-	if len(matches) != 2 {
+	if len(matches) == 2 {
+		return strings.TrimSpace(matches[1])
+	}
+	_, threadID, ok := extractCodexStructuredPayload(output)
+	if !ok {
 		return ""
 	}
-	return strings.TrimSpace(matches[1])
+	return strings.TrimSpace(threadID)
 }
 
 func stringArg(args map[string]any, key string) string {
