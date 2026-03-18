@@ -7,7 +7,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/D3Hunter/frieren-clone/pkg/codex"
 	"github.com/D3Hunter/frieren-clone/pkg/config"
 	"github.com/D3Hunter/frieren-clone/pkg/feishu"
 	"github.com/D3Hunter/frieren-clone/pkg/handler"
@@ -133,7 +132,6 @@ func main() {
 	}
 	commandService := service.NewCommandService(service.CommandServiceDeps{
 		MCP:        mcpGatewayAdapter{gateway: mcp.NewGateway(cfg.MCP.Endpoint, time.Duration(cfg.MCP.TimeoutSec)*time.Second)},
-		Codex:      codex.NewRunner(),
 		Sender:     messageSenderAdapter{sender: textSender},
 		TopicStore: topicStoreAdapter{store: topicStore},
 		Logger:     logger.Named("service"),

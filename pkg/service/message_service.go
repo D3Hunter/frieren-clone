@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -30,14 +29,6 @@ type MCPGateway interface {
 	GetToolSchema(ctx context.Context, tool string) (string, error)
 	// CallTool executes one MCP tool with decoded JSON arguments.
 	CallTool(ctx context.Context, tool string, args map[string]any) (string, error)
-}
-
-// CodexGateway describes Codex thread start/reply operations needed by CommandService.
-type CodexGateway interface {
-	// Start runs a new Codex thread in cwd for prompt and returns thread ID plus output text.
-	Start(ctx context.Context, cwd, prompt string) (threadID string, output string, err error)
-	// Reply runs a follow-up prompt in an existing Codex thread.
-	Reply(ctx context.Context, cwd, threadID, prompt string) (output string, err error)
 }
 
 // TopicBinding links a Feishu topic thread with a project alias and Codex thread ID.
@@ -106,7 +97,6 @@ type CommandServiceConfig struct {
 // CommandServiceDeps groups external dependencies used by NewCommandService.
 type CommandServiceDeps struct {
 	MCP        MCPGateway
-	Codex      CodexGateway
 	Sender     MessageSender
 	TopicStore TopicStore
 	Logger     *zap.Logger
@@ -116,14 +106,10 @@ type CommandServiceDeps struct {
 // CommandService parses incoming messages and routes them to MCP/Codex workflows.
 type CommandService struct {
 	mcp        MCPGateway
-	codex      CodexGateway
 	sender     MessageSender
 	topicStore TopicStore
 	cfg        CommandServiceConfig
 	logger     *zap.Logger
-
-	mcpCodexTopicThreads map[string]string
-	mcpCodexTopicMu      sync.RWMutex
 }
 
 var mentionTagPattern = regexp.MustCompile(`(?s)<at\b[^>]*>.*?</at>`)
@@ -133,9 +119,14 @@ var codexThreadIDPattern = regexp.MustCompile(`(?i)"thread(?:_|)id"\s*:\s*"([^"]
 const (
 	processingStartReactionType = "OnIt"
 	codexToolName               = "codex"
+	codexReplyToolName          = "codex-reply"
 	mcpCodexTopicAlias          = "__mcp_codex__"
 	defaultHelpMessage          = "可用命令：\n/help\n/mcp tools\n/mcp schema <tool>\n/mcp call <tool> <json>\n/<project> <prompt>\n\n提示：/mcp call codex 每次都会新建 Codex 线程。"
 	codexPromptHelpMessage      = `用法：/mcp call codex {"prompt":"<你的问题>"}`
+	defaultCodexModel           = "gpt-5.3-codex"
+	defaultCodexReasoningEffort = "xhigh"
+	defaultCodexSandbox         = "danger-full-access"
+	defaultCodexApprovalPolicy  = "never"
 	// Intentionally keep /mcp call codex as "start new thread" so users can open
 	// multiple independent Codex threads inside one Feishu topic when needed.
 	codexNewThreadNotice     = "提示：按设计，/mcp call codex 每次都会新建 Codex 线程，不会复用当前话题绑定。"
@@ -168,13 +159,10 @@ func NewCommandService(deps CommandServiceDeps) *CommandService {
 
 	return &CommandService{
 		mcp:        deps.MCP,
-		codex:      deps.Codex,
 		sender:     deps.Sender,
 		topicStore: deps.TopicStore,
 		cfg:        cfg,
 		logger:     logger,
-
-		mcpCodexTopicThreads: map[string]string{},
 	}
 }
 
@@ -309,11 +297,19 @@ func (s *CommandService) handleSlashCommand(ctx context.Context, msg IncomingMes
 			return err
 		}
 		outcome, err := s.executeWithHeartbeat(ctx, msg, func(runCtx context.Context) (commandOutcome, error) {
-			threadID, output, runErr := s.codex.Start(runCtx, cwd, prompt)
+			startArgs := ensureCodexStartDefaults(map[string]any{
+				"cwd":    cwd,
+				"prompt": prompt,
+			})
+			output, runErr := s.mcp.CallTool(runCtx, codexToolName, startArgs)
 			if runErr != nil {
 				return commandOutcome{}, runErr
 			}
-			return commandOutcome{text: output, codexThreadID: threadID, projectAlias: alias}, nil
+			return commandOutcome{
+				text:          output,
+				codexThreadID: strings.TrimSpace(parseCodexThreadID(output)),
+				projectAlias:  alias,
+			}, nil
 		})
 		if err != nil {
 			return s.replyCommandFailure(ctx, msg, "执行失败", err)
@@ -394,14 +390,17 @@ func (s *CommandService) handleMCPCall(ctx context.Context, msg IncomingMessage,
 	msgLogger := s.messageLogger(msg)
 	msgLogger.Info("handling mcp call", zap.String("tool", tool), zap.Any("args", args))
 	if strings.EqualFold(tool, codexToolName) {
-		s.injectCodexThreadID(msg.ChatID, msg.ThreadID, args)
+		args = sanitizeCodexStartArgs(args)
 	}
 	outcome, err := s.executeWithHeartbeat(ctx, msg, func(runCtx context.Context) (commandOutcome, error) {
 		result, runErr := s.mcp.CallTool(runCtx, tool, args)
 		if runErr != nil {
 			return commandOutcome{}, runErr
 		}
-		return commandOutcome{text: result}, nil
+		return commandOutcome{
+			text:          result,
+			codexThreadID: strings.TrimSpace(parseCodexThreadID(result)),
+		}, nil
 	})
 	if err != nil {
 		return s.replyCommandFailure(ctx, msg, "调用工具失败", err)
@@ -422,18 +421,28 @@ func (s *CommandService) handleMCPCall(ctx context.Context, msg IncomingMessage,
 
 func (s *CommandService) handleTopicFollowup(ctx context.Context, msg IncomingMessage, cleanText string, binding TopicBinding) error {
 	msgLogger := s.messageLogger(msg)
-	alias := strings.ToLower(strings.TrimSpace(binding.ProjectAlias))
-	cwd := strings.TrimSpace(s.cfg.ProjectAliasCWD[alias])
-	if cwd == "" {
-		_, err := s.send(ctx, msg, fmt.Sprintf("%s：%s", unknownProjectHelpPrefix, alias))
+	threadID := strings.TrimSpace(binding.CodexThreadID)
+	if threadID == "" {
+		_, err := s.send(ctx, msg, "当前话题没有可继续的 Codex 线程，请先发送新的斜杠命令。")
 		return err
 	}
 	outcome, err := s.executeWithHeartbeat(ctx, msg, func(runCtx context.Context) (commandOutcome, error) {
-		output, runErr := s.codex.Reply(runCtx, cwd, binding.CodexThreadID, cleanText)
+		output, runErr := s.mcp.CallTool(runCtx, codexReplyToolName, map[string]any{
+			"threadId": threadID,
+			"prompt":   cleanText,
+		})
 		if runErr != nil {
 			return commandOutcome{}, runErr
 		}
-		return commandOutcome{text: output, codexThreadID: binding.CodexThreadID, projectAlias: alias}, nil
+		resolvedThreadID := strings.TrimSpace(parseCodexThreadID(output))
+		if resolvedThreadID == "" {
+			resolvedThreadID = threadID
+		}
+		return commandOutcome{
+			text:          output,
+			codexThreadID: resolvedThreadID,
+			projectAlias:  strings.ToLower(strings.TrimSpace(binding.ProjectAlias)),
+		}, nil
 	})
 	if err != nil {
 		return s.replyCommandFailure(ctx, msg, "执行失败", err)
@@ -447,14 +456,18 @@ func (s *CommandService) handleTopicFollowup(ctx context.Context, msg IncomingMe
 		if feishuThreadID != "" {
 			bindingLogger := msgLogger.With(
 				zap.String("topic_id", feishuThreadID),
-				zap.String("project_alias", alias),
-				zap.String("codex_thread_id", strings.TrimSpace(binding.CodexThreadID)),
+				zap.String("project_alias", strings.ToLower(strings.TrimSpace(outcome.projectAlias))),
+				zap.String("codex_thread_id", strings.TrimSpace(outcome.codexThreadID)),
 			)
+			projectAlias := strings.ToLower(strings.TrimSpace(outcome.projectAlias))
+			if projectAlias == "" {
+				projectAlias = mcpCodexTopicAlias
+			}
 			if err := s.topicStore.Upsert(TopicBinding{
 				ChatID:         msg.ChatID,
 				FeishuThreadID: feishuThreadID,
-				ProjectAlias:   alias,
-				CodexThreadID:  binding.CodexThreadID,
+				ProjectAlias:   projectAlias,
+				CodexThreadID:  strings.TrimSpace(outcome.codexThreadID),
 			}); err != nil {
 				bindingLogger.Error("refresh topic binding failed", zap.Error(err))
 				return err
@@ -657,52 +670,6 @@ func chooseThreadID(candidates ...string) string {
 	return ""
 }
 
-func (s *CommandService) injectCodexThreadID(chatID, feishuThreadID string, args map[string]any) {
-	if args == nil {
-		return
-	}
-	if strings.TrimSpace(stringArg(args, "threadId")) != "" {
-		return
-	}
-
-	existing := s.lookupCodexThreadID(chatID, feishuThreadID)
-	if existing == "" {
-		return
-	}
-	s.logger.Info(
-		"injecting codex thread id into mcp call args",
-		zap.String("chat_id", strings.TrimSpace(chatID)),
-		zap.String("thread_id", strings.TrimSpace(feishuThreadID)),
-		zap.String("topic_id", strings.TrimSpace(feishuThreadID)),
-		zap.String("codex_thread_id", existing),
-	)
-	args["threadId"] = existing
-}
-
-func (s *CommandService) lookupCodexThreadID(chatID, feishuThreadID string) string {
-	chatID = strings.TrimSpace(chatID)
-	feishuThreadID = strings.TrimSpace(feishuThreadID)
-	if chatID == "" || feishuThreadID == "" {
-		return ""
-	}
-
-	s.mcpCodexTopicMu.RLock()
-	threadID := strings.TrimSpace(s.mcpCodexTopicThreads[topicThreadKey(chatID, feishuThreadID)])
-	s.mcpCodexTopicMu.RUnlock()
-	if threadID != "" {
-		return threadID
-	}
-
-	if s.topicStore == nil {
-		return ""
-	}
-	binding, ok := s.topicStore.Get(chatID, feishuThreadID)
-	if !ok {
-		return ""
-	}
-	return strings.TrimSpace(binding.CodexThreadID)
-}
-
 func (s *CommandService) recordCodexThreadID(msg IncomingMessage, finalReceipt SendReceipt, output string) {
 	chatID := strings.TrimSpace(msg.ChatID)
 	feishuThreadID := chooseThreadID(msg.ThreadID, finalReceipt.ThreadID)
@@ -710,10 +677,6 @@ func (s *CommandService) recordCodexThreadID(msg IncomingMessage, finalReceipt S
 	if chatID == "" || feishuThreadID == "" || codexThreadID == "" {
 		return
 	}
-
-	s.mcpCodexTopicMu.Lock()
-	s.mcpCodexTopicThreads[topicThreadKey(chatID, feishuThreadID)] = codexThreadID
-	s.mcpCodexTopicMu.Unlock()
 
 	if s.topicStore == nil {
 		return
@@ -751,10 +714,6 @@ func parseCodexThreadID(output string) string {
 	return strings.TrimSpace(matches[1])
 }
 
-func topicThreadKey(chatID, feishuThreadID string) string {
-	return strings.TrimSpace(chatID) + "::" + strings.TrimSpace(feishuThreadID)
-}
-
 func stringArg(args map[string]any, key string) string {
 	raw, ok := args[key]
 	if !ok || raw == nil {
@@ -768,13 +727,44 @@ func stringArg(args map[string]any, key string) string {
 	}
 }
 
-func (s *CommandService) bindingSupportsProjectFollowup(binding TopicBinding) bool {
-	alias := strings.ToLower(strings.TrimSpace(binding.ProjectAlias))
-	if alias == "" || alias == mcpCodexTopicAlias {
-		return false
+func sanitizeCodexStartArgs(args map[string]any) map[string]any {
+	if args == nil {
+		args = map[string]any{}
 	}
-	cwd := strings.TrimSpace(s.cfg.ProjectAliasCWD[alias])
-	return cwd != ""
+	delete(args, "threadId")
+	delete(args, "thread_id")
+	delete(args, "conversationId")
+	delete(args, "conversation_id")
+	return ensureCodexStartDefaults(args)
+}
+
+func ensureCodexStartDefaults(args map[string]any) map[string]any {
+	if args == nil {
+		args = map[string]any{}
+	}
+	if strings.TrimSpace(stringArg(args, "model")) == "" {
+		args["model"] = defaultCodexModel
+	}
+	if strings.TrimSpace(stringArg(args, "sandbox")) == "" {
+		args["sandbox"] = defaultCodexSandbox
+	}
+	if strings.TrimSpace(stringArg(args, "approval-policy")) == "" {
+		args["approval-policy"] = defaultCodexApprovalPolicy
+	}
+
+	config, ok := args["config"].(map[string]any)
+	if !ok || config == nil {
+		config = map[string]any{}
+	}
+	if strings.TrimSpace(stringArg(config, "model_reasoning_effort")) == "" {
+		config["model_reasoning_effort"] = defaultCodexReasoningEffort
+	}
+	args["config"] = config
+	return args
+}
+
+func (s *CommandService) bindingSupportsProjectFollowup(binding TopicBinding) bool {
+	return strings.TrimSpace(binding.CodexThreadID) != ""
 }
 
 func (s *CommandService) messageLogger(msg IncomingMessage) *zap.Logger {
