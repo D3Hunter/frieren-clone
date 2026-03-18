@@ -132,6 +132,7 @@ const (
 	codexNewThreadNotice     = "提示：按设计，/mcp call codex 每次都会新建 Codex 线程，不会复用当前话题绑定。"
 	groupMentionHelpMessage  = "群聊里请先 @机器人 再发送斜杠命令，例如：@机器人 /help"
 	unknownProjectHelpPrefix = "未知项目别名"
+	codexSessionTimeout      = time.Hour
 )
 
 // NewCommandService builds CommandService with normalized config and safe logger defaults.
@@ -445,7 +446,26 @@ func (s *CommandService) handleTopicFollowup(ctx context.Context, msg IncomingMe
 		}, nil
 	})
 	if err != nil {
-		return s.replyCommandFailure(ctx, msg, "执行失败", err)
+		if !isCodexReplySessionNotFoundError(err) {
+			return s.replyCommandFailure(ctx, msg, "执行失败", err)
+		}
+
+		notice := s.formatSessionResetNotice(msg, binding)
+		if _, noticeErr := s.send(ctx, msg, notice); noticeErr != nil {
+			return noticeErr
+		}
+		msgLogger.Warn(
+			"codex reply session not found; restarting with a new codex session",
+			zap.String("project_alias", strings.ToLower(strings.TrimSpace(binding.ProjectAlias))),
+			zap.String("previous_codex_thread_id", threadID),
+		)
+
+		outcome, err = s.executeWithHeartbeat(ctx, msg, func(runCtx context.Context) (commandOutcome, error) {
+			return s.startNewCodexSessionFromFollowup(runCtx, cleanText, binding, threadID)
+		})
+		if err != nil {
+			return s.replyCommandFailure(ctx, msg, "执行失败", err)
+		}
 	}
 	finalReceipt, err := s.send(ctx, msg, normalizeOutput(outcome.text))
 	if err != nil {
@@ -476,6 +496,32 @@ func (s *CommandService) handleTopicFollowup(ctx context.Context, msg IncomingMe
 		}
 	}
 	return nil
+}
+
+func (s *CommandService) startNewCodexSessionFromFollowup(ctx context.Context, prompt string, binding TopicBinding, previousThreadID string) (commandOutcome, error) {
+	projectAlias := strings.ToLower(strings.TrimSpace(binding.ProjectAlias))
+	startArgs := ensureCodexStartDefaults(map[string]any{
+		"prompt": prompt,
+	})
+	if cwd, ok := s.cfg.ProjectAliasCWD[projectAlias]; ok && strings.TrimSpace(cwd) != "" {
+		startArgs["cwd"] = cwd
+	}
+	output, err := s.mcp.CallTool(ctx, codexToolName, startArgs)
+	if err != nil {
+		return commandOutcome{}, err
+	}
+	resolvedThreadID := strings.TrimSpace(parseCodexThreadID(output))
+	if resolvedThreadID == "" {
+		resolvedThreadID = strings.TrimSpace(previousThreadID)
+	}
+	if projectAlias == "" {
+		projectAlias = mcpCodexTopicAlias
+	}
+	return commandOutcome{
+		text:          output,
+		codexThreadID: resolvedThreadID,
+		projectAlias:  projectAlias,
+	}, nil
 }
 
 type commandOutcome struct {
@@ -658,6 +704,46 @@ func appendTextNotice(text, notice string) string {
 		return notice
 	}
 	return text + "\n\n" + notice
+}
+
+func isCodexReplySessionNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lowered := strings.ToLower(err.Error())
+	return strings.Contains(lowered, `tool "codex-reply"`) &&
+		strings.Contains(lowered, "session not found for thread_id")
+}
+
+func (s *CommandService) formatSessionResetNotice(msg IncomingMessage, binding TopicBinding) string {
+	projectAlias := strings.TrimSpace(binding.ProjectAlias)
+	if projectAlias == "" {
+		projectAlias = mcpCodexTopicAlias
+	}
+	cwd := ""
+	if resolvedCWD, ok := s.cfg.ProjectAliasCWD[strings.ToLower(projectAlias)]; ok {
+		cwd = strings.TrimSpace(resolvedCWD)
+	}
+	if cwd == "" {
+		cwd = "(未设置)"
+	}
+	previousThreadID := strings.TrimSpace(binding.CodexThreadID)
+	if previousThreadID == "" {
+		previousThreadID = "(空)"
+	}
+	feishuTopicID := chooseThreadID(msg.ThreadID, binding.FeishuThreadID)
+	if feishuTopicID == "" {
+		feishuTopicID = "(空)"
+	}
+	return fmt.Sprintf(
+		"检测到 Codex 会话已过期（超过 %s 已自动关闭）。从这条消息开始将开启新会话，不再复用上一条会话上下文。\n环境信息：\n- project_alias: %s\n- previous_codex_thread_id: %s\n- cwd: %s\n- feishu_topic_id: %s\n- chat_id: %s",
+		formatElapsedDuration(codexSessionTimeout),
+		projectAlias,
+		previousThreadID,
+		cwd,
+		feishuTopicID,
+		strings.TrimSpace(msg.ChatID),
+	)
 }
 
 func chooseThreadID(candidates ...string) string {

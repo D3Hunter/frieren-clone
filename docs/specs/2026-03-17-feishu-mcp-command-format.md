@@ -117,7 +117,7 @@ cwd = "/abs/path/to/project"
 Defaults/validation:
 
 - `mcp.endpoint` default: `http://localhost:8787/mcp`
-- `mcp.timeout_sec` default: `30`
+- `mcp.timeout_sec` default: `30` (used for non-Codex MCP operations; `codex`/`codex-reply` calls are long-running and do not use this per-call timeout)
 - `commands.heartbeat_sec` default: `180`
 - `commands.start_reaction` default: `OnIt`
 - `runtime.topic_state_file` default: `.state/topic-state.json`
@@ -130,11 +130,16 @@ Implementation: `pkg/mcp/adapter.go`.
 
 - SDK: `github.com/modelcontextprotocol/go-sdk v1.3.1` (compatible with Go 1.23.2 in this repo)
 - Transport: `mcp.StreamableClientTransport`
-- Session policy: **connect per command, close after command**
+- Session policy: **reuse one long-lived MCP session per bot process, close on shutdown**
+  - Rationale: session-scoped tool pairs like `codex` + `codex-reply` rely on the same MCP session context across follow-up calls.
+  - Idle timeout: MCP session is rotated after 1 hour of inactivity to avoid keeping stale sessions indefinitely.
 - Operations:
   - `/mcp tools` -> `ListTools` (cursor loop)
   - `/mcp schema <tool>` -> list tools and print target `inputSchema`
   - `/mcp call <tool> <json>` -> `CallTool`
+- Timeout behavior:
+  - non-Codex tool calls use `mcp.timeout_sec`
+  - `codex` and `codex-reply` are not bounded by `mcp.timeout_sec` so long-running Codex execution is not cut off at 30s
 - Tool-level `isError=true` is surfaced as command failure text.
 
 No local MCP schema/tool cache is used in current design.
@@ -162,6 +167,13 @@ Uses MCP `codex-reply` tool:
 - `prompt=<plain_text_followup>`
 
 Final visible message is taken from MCP tool textual output; thread id is parsed from output JSON fragment when present, otherwise previous bound id is retained.
+
+If follow-up `codex-reply` returns session-not-found (for example, after MCP session idle-timeout rotation):
+
+- bot first posts a topic notice explaining this follow-up will run in a new Codex session,
+- notice includes environment snapshot (`project_alias`, previous `codex_thread_id`, `cwd`, topic id, chat id),
+- bot then starts a fresh `codex` run with follow-up prompt (and `cwd` when project alias maps to one),
+- topic binding is refreshed to the new thread id.
 
 ## 8) Topic-state persistence model
 

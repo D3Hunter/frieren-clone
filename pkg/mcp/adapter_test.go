@@ -3,10 +3,12 @@ package mcp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"iter"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -85,6 +87,9 @@ func TestGateway_ListToolsAndSchemaAndCall(t *testing.T) {
 	if !strings.Contains(result, "echo: hello") {
 		t.Fatalf("unexpected call result: %q", result)
 	}
+	if err := gateway.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
 
 	if eventStore.closed.Load() == 0 {
 		t.Fatal("expected session close to be called")
@@ -108,11 +113,161 @@ func TestGateway_CallTool_PropagatesToolErrors(t *testing.T) {
 	defer httpServer.Close()
 
 	gateway := NewGateway(httpServer.URL, 3*time.Second)
+	defer func() {
+		if err := gateway.Close(); err != nil {
+			t.Fatalf("Close error: %v", err)
+		}
+	}()
 	_, err := gateway.CallTool(context.Background(), "echo", map[string]any{"text": " "})
 	if err == nil {
 		t.Fatal("expected tool error")
 	}
 	if !strings.Contains(err.Error(), "text required") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestGateway_CallTool_ReusesSessionForSessionScopedFollowupTools(t *testing.T) {
+	server := sdk.NewServer(&sdk.Implementation{Name: "test-server", Version: "1.0.0"}, nil)
+	var (
+		mu            sync.Mutex
+		sessionThread = map[string]string{}
+		startThreadID string
+	)
+	sdk.AddTool(server, &sdk.Tool{Name: "codex", Description: "start codex session"}, func(ctx context.Context, req *sdk.CallToolRequest, in struct {
+		Prompt string `json:"prompt"`
+	}) (*sdk.CallToolResult, map[string]any, error) {
+		threadID := "thread-" + req.Session.ID()
+		mu.Lock()
+		sessionThread[req.Session.ID()] = threadID
+		startThreadID = threadID
+		mu.Unlock()
+		return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: "ok"}}}, map[string]any{"threadId": threadID}, nil
+	})
+	sdk.AddTool(server, &sdk.Tool{Name: "codex-reply", Description: "continue codex session"}, func(ctx context.Context, req *sdk.CallToolRequest, in struct {
+		ThreadID string `json:"threadId"`
+		Prompt   string `json:"prompt"`
+	}) (*sdk.CallToolResult, map[string]any, error) {
+		mu.Lock()
+		expectedThreadID, ok := sessionThread[req.Session.ID()]
+		mu.Unlock()
+		if !ok || expectedThreadID != in.ThreadID {
+			return nil, nil, fmt.Errorf("Session not found for thread_id: %s", in.ThreadID)
+		}
+		return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: "reply ok"}}}, map[string]any{"threadId": in.ThreadID}, nil
+	})
+
+	httpServer := httptest.NewServer(sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server {
+		return server
+	}, nil))
+	defer httpServer.Close()
+
+	gateway := NewGateway(httpServer.URL, 3*time.Second)
+	defer func() {
+		if err := gateway.Close(); err != nil {
+			t.Fatalf("Close error: %v", err)
+		}
+	}()
+	ctx := context.Background()
+
+	if _, err := gateway.CallTool(ctx, "codex", map[string]any{"prompt": "start"}); err != nil {
+		t.Fatalf("CallTool codex error: %v", err)
+	}
+
+	mu.Lock()
+	threadID := startThreadID
+	mu.Unlock()
+	if strings.TrimSpace(threadID) == "" {
+		t.Fatal("expected non-empty thread id from codex start call")
+	}
+
+	if _, err := gateway.CallTool(ctx, "codex-reply", map[string]any{
+		"threadId": threadID,
+		"prompt":   "follow up",
+	}); err != nil {
+		t.Fatalf("CallTool codex-reply error: %v", err)
+	}
+}
+
+func TestGateway_CallTool_RecreatesSessionAfterIdleTimeout(t *testing.T) {
+	server := sdk.NewServer(&sdk.Implementation{Name: "test-server", Version: "1.0.0"}, nil)
+	var (
+		mu         sync.Mutex
+		sessionIDs []string
+	)
+	sdk.AddTool(server, &sdk.Tool{Name: "echo", Description: "echo text"}, func(ctx context.Context, req *sdk.CallToolRequest, in struct {
+		Text string `json:"text"`
+	}) (*sdk.CallToolResult, map[string]any, error) {
+		mu.Lock()
+		sessionIDs = append(sessionIDs, req.Session.ID())
+		mu.Unlock()
+		return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: in.Text}}}, nil, nil
+	})
+
+	httpServer := httptest.NewServer(sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server {
+		return server
+	}, nil))
+	defer httpServer.Close()
+
+	gateway := NewGateway(httpServer.URL, 3*time.Second)
+	gateway.sessionIdleTimeout = 50 * time.Millisecond
+	defer func() {
+		if err := gateway.Close(); err != nil {
+			t.Fatalf("Close error: %v", err)
+		}
+	}()
+
+	if _, err := gateway.CallTool(context.Background(), "echo", map[string]any{"text": "first"}); err != nil {
+		t.Fatalf("first CallTool error: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if _, err := gateway.CallTool(context.Background(), "echo", map[string]any{"text": "second"}); err != nil {
+		t.Fatalf("second CallTool error: %v", err)
+	}
+	time.Sleep(70 * time.Millisecond)
+	if _, err := gateway.CallTool(context.Background(), "echo", map[string]any{"text": "third"}); err != nil {
+		t.Fatalf("third CallTool error: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sessionIDs) != 3 {
+		t.Fatalf("expected 3 calls, got %d", len(sessionIDs))
+	}
+	if sessionIDs[0] != sessionIDs[1] {
+		t.Fatalf("expected first two calls to share session, got %q and %q", sessionIDs[0], sessionIDs[1])
+	}
+	if sessionIDs[1] == sessionIDs[2] {
+		t.Fatalf("expected third call to use a new session after timeout, got %q", sessionIDs[2])
+	}
+}
+
+func TestGateway_CallTool_CodexReplyIgnoresGatewayTimeout(t *testing.T) {
+	server := sdk.NewServer(&sdk.Implementation{Name: "test-server", Version: "1.0.0"}, nil)
+	sdk.AddTool(server, &sdk.Tool{Name: "codex-reply", Description: "continue codex session"}, func(ctx context.Context, req *sdk.CallToolRequest, in struct {
+		ThreadID string `json:"threadId"`
+		Prompt   string `json:"prompt"`
+	}) (*sdk.CallToolResult, map[string]any, error) {
+		time.Sleep(80 * time.Millisecond)
+		return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: "reply ok"}}}, map[string]any{"threadId": in.ThreadID}, nil
+	})
+
+	httpServer := httptest.NewServer(sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server {
+		return server
+	}, nil))
+	defer httpServer.Close()
+
+	gateway := NewGateway(httpServer.URL, 30*time.Millisecond)
+	defer func() {
+		if err := gateway.Close(); err != nil {
+			t.Fatalf("Close error: %v", err)
+		}
+	}()
+
+	if _, err := gateway.CallTool(context.Background(), "codex-reply", map[string]any{
+		"threadId": "thread-1",
+		"prompt":   "continue",
+	}); err != nil {
+		t.Fatalf("CallTool codex-reply should not be bounded by gateway timeout, got error: %v", err)
 	}
 }

@@ -130,8 +130,14 @@ func main() {
 	for alias, project := range cfg.Projects {
 		projectAliasCWD[alias] = project.CWD
 	}
+	mcpGateway := mcp.NewGateway(cfg.MCP.Endpoint, time.Duration(cfg.MCP.TimeoutSec)*time.Second)
+	defer func() {
+		if err := mcpGateway.Close(); err != nil {
+			logger.Warn("close mcp gateway session failed", zap.Error(err))
+		}
+	}()
 	commandService := service.NewCommandService(service.CommandServiceDeps{
-		MCP:        mcpGatewayAdapter{gateway: mcp.NewGateway(cfg.MCP.Endpoint, time.Duration(cfg.MCP.TimeoutSec)*time.Second)},
+		MCP:        mcpGatewayAdapter{gateway: mcpGateway},
 		Sender:     messageSenderAdapter{sender: textSender},
 		TopicStore: topicStoreAdapter{store: topicStore},
 		Logger:     logger.Named("service"),
