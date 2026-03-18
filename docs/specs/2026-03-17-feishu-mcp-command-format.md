@@ -28,6 +28,8 @@ Behavior notes:
 - `/mcp call` currently accepts only a JSON object payload.
 - `/mcp call codex` is treated as a fresh-run command and starts a new Codex thread each time.
 - Rationale: this is intentional so one Feishu topic can host multiple independent Codex threads when users want parallel or reset investigations.
+- Any slash command that starts Codex execution (`/mcp call codex`, `/<project> <prompt>`) always creates a new thread and resets the topic binding to that latest thread.
+- Plain-text follow-up messages in the same topic always continue the latest bound Codex thread.
 - `/help` includes a one-line reminder of this `/mcp call codex` new-thread behavior.
 - Unknown commands fall back to concise help.
 - Unknown project alias returns `未知项目别名：<alias>`.
@@ -86,9 +88,10 @@ Plain text outside bound topic context does not use legacy echo behavior; it ret
    - creates short-lived go-sdk session per MCP command,
    - lists tools, resolves schema, executes call.
 
-6. `pkg/codex/runner.go`
-   - starts/replies Codex commands,
-   - parses JSONL event stream to obtain thread id and final agent text.
+6. `pkg/service/message_service.go`
+   - starts Codex sessions through MCP `codex` tool for slash commands,
+   - continues Codex sessions through MCP `codex-reply` tool for plain-text topic follow-ups,
+   - parses tool output text to extract `threadId` and persist latest topic binding.
 
 ## 5) Config contract
 
@@ -138,30 +141,27 @@ No local MCP schema/tool cache is used in current design.
 
 ## 7) Codex integration details
 
-Implementation: `pkg/codex/runner.go`.
+Implementation: `pkg/service/message_service.go` with MCP tools exposed by local MCP server.
 
-### New thread (`/<project> <prompt>`)
+### New thread (`/<project> <prompt>` and `/mcp call codex ...`)
 
-Uses:
+Uses MCP `codex` tool with defaults auto-filled when missing:
 
-- `codex exec --json`
-- model default `gpt-5.4-codex`
+- model default `gpt-5.3-codex`
 - sandbox default `danger-full-access`
-- config override `approval_policy="never"`
+- `approval-policy="never"`
+- `config.model_reasoning_effort="xhigh"`
 
-Thread id is parsed from `thread.started` event in JSONL.
+`threadId`/`conversationId` fields are removed for `/mcp call codex` so slash Codex commands always start a fresh thread.
 
 ### Existing thread (topic follow-up)
 
-Primary path:
+Uses MCP `codex-reply` tool:
 
-- `codex-reply --json --thread <codex_thread_id> ...`
+- `threadId=<bound_codex_thread_id>`
+- `prompt=<plain_text_followup>`
 
-Fallback path if `codex-reply` binary is missing:
-
-- `codex exec resume --json <thread_id> <prompt>`
-
-Final visible message is taken from latest `item.completed` with `item.type == "agent_message"`.
+Final visible message is taken from MCP tool textual output; thread id is parsed from output JSON fragment when present, otherwise previous bound id is retained.
 
 ## 8) Topic-state persistence model
 
@@ -233,4 +233,4 @@ Repository verification command:
 - Group slash trigger relies on mention open_id extraction from Feishu event mentions.
 - `/mcp call` supports JSON object payload only (by design for v1 command clarity).
 - No MCP tool/schema cache yet.
-- Codex reply depends on local `codex` CLI availability (and optionally `codex-reply`).
+- Codex execution now depends on MCP server availability and exposed tools (`codex`, `codex-reply`).

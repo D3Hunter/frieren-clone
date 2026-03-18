@@ -17,7 +17,9 @@ type fakeMCPGateway struct {
 	tools      []ToolInfo
 	schemaText string
 	callText   string
+	callTexts  []string
 	callErr    error
+	callDelay  time.Duration
 	calledWith struct {
 		tool string
 		args map[string]any
@@ -40,6 +42,9 @@ func (f *fakeMCPGateway) GetToolSchema(ctx context.Context, tool string) (string
 }
 
 func (f *fakeMCPGateway) CallTool(ctx context.Context, tool string, args map[string]any) (string, error) {
+	if f.callDelay > 0 {
+		time.Sleep(f.callDelay)
+	}
 	f.calledWith.tool = tool
 	f.calledWith.args = args
 	clonedArgs := make(map[string]any, len(args))
@@ -53,20 +58,24 @@ func (f *fakeMCPGateway) CallTool(ctx context.Context, tool string, args map[str
 	if f.callErr != nil {
 		return "", f.callErr
 	}
+	if len(f.callTexts) > 0 {
+		next := f.callTexts[0]
+		f.callTexts = f.callTexts[1:]
+		return next, nil
+	}
 	if f.callText == "" {
 		return "ok", nil
 	}
 	return f.callText, nil
 }
 
-func TestHandleIncomingMessage_MCPCallCodexReusesThreadWithinTopic(t *testing.T) {
+func TestHandleIncomingMessage_MCPCallCodexAlwaysStartsNewThreadWithinTopic(t *testing.T) {
 	mcp := &fakeMCPGateway{
 		callText: "ok\n{\"threadId\":\"codex_t1\"}",
 	}
 	sender := &fakeMessageSender{}
 	svc := NewCommandService(CommandServiceDeps{
 		MCP:        mcp,
-		Codex:      &fakeCodexGateway{},
 		Sender:     sender,
 		TopicStore: newFakeTopicStore(),
 		Config:     CommandServiceConfig{BotOpenID: "ou_bot", Heartbeat: time.Hour},
@@ -102,20 +111,18 @@ func TestHandleIncomingMessage_MCPCallCodexReusesThreadWithinTopic(t *testing.T)
 	if _, ok := mcp.callHistory[0].args["threadId"]; ok {
 		t.Fatalf("expected first call without injected threadId, got %#v", mcp.callHistory[0].args["threadId"])
 	}
-	gotThreadID, ok := mcp.callHistory[1].args["threadId"].(string)
-	if !ok || gotThreadID != "codex_t1" {
-		t.Fatalf("expected second call to reuse codex_t1, got %#v", mcp.callHistory[1].args["threadId"])
+	if _, ok := mcp.callHistory[1].args["threadId"]; ok {
+		t.Fatalf("expected second call without injected threadId, got %#v", mcp.callHistory[1].args["threadId"])
 	}
 }
 
-func TestHandleIncomingMessage_MCPCallCodexPersistsTopicThreadForNewService(t *testing.T) {
+func TestHandleIncomingMessage_MCPCallCodexPersistsTopicThreadForFollowupWithoutInjection(t *testing.T) {
 	topicStore := newFakeTopicStore()
 	firstMCP := &fakeMCPGateway{
 		callText: "ok\n{\"threadId\":\"codex_t1\"}",
 	}
 	firstSvc := NewCommandService(CommandServiceDeps{
 		MCP:        firstMCP,
-		Codex:      &fakeCodexGateway{},
 		Sender:     &fakeMessageSender{},
 		TopicStore: topicStore,
 		Config:     CommandServiceConfig{BotOpenID: "ou_bot", Heartbeat: time.Hour},
@@ -149,7 +156,6 @@ func TestHandleIncomingMessage_MCPCallCodexPersistsTopicThreadForNewService(t *t
 	}
 	secondSvc := NewCommandService(CommandServiceDeps{
 		MCP:        secondMCP,
-		Codex:      &fakeCodexGateway{},
 		Sender:     &fakeMessageSender{},
 		TopicStore: topicStore,
 		Config:     CommandServiceConfig{BotOpenID: "ou_bot", Heartbeat: time.Hour},
@@ -170,66 +176,9 @@ func TestHandleIncomingMessage_MCPCallCodexPersistsTopicThreadForNewService(t *t
 	if len(secondMCP.callHistory) != 1 {
 		t.Fatalf("expected one call on second service, got %d", len(secondMCP.callHistory))
 	}
-	gotThreadID, ok := secondMCP.callHistory[0].args["threadId"].(string)
-	if !ok || gotThreadID != "codex_t1" {
-		t.Fatalf("expected persisted threadId codex_t1, got %#v", secondMCP.callHistory[0].args["threadId"])
+	if _, ok := secondMCP.callHistory[0].args["threadId"]; ok {
+		t.Fatalf("expected no injected threadId, got %#v", secondMCP.callHistory[0].args["threadId"])
 	}
-}
-
-type fakeCodexGateway struct {
-	startThreadID string
-	startOutput   string
-	replyOutput   string
-	err           error
-	delay         time.Duration
-
-	startCalls []struct {
-		cwd    string
-		prompt string
-	}
-	replyCalls []struct {
-		cwd      string
-		threadID string
-		prompt   string
-	}
-}
-
-func (f *fakeCodexGateway) Start(ctx context.Context, cwd, prompt string) (string, string, error) {
-	if f.delay > 0 {
-		time.Sleep(f.delay)
-	}
-	f.startCalls = append(f.startCalls, struct {
-		cwd    string
-		prompt string
-	}{cwd: cwd, prompt: prompt})
-	if f.err != nil {
-		return "", "", f.err
-	}
-	if f.startThreadID == "" {
-		f.startThreadID = "codex_thread_new"
-	}
-	if f.startOutput == "" {
-		f.startOutput = "done"
-	}
-	return f.startThreadID, f.startOutput, nil
-}
-
-func (f *fakeCodexGateway) Reply(ctx context.Context, cwd, threadID, prompt string) (string, error) {
-	if f.delay > 0 {
-		time.Sleep(f.delay)
-	}
-	f.replyCalls = append(f.replyCalls, struct {
-		cwd      string
-		threadID string
-		prompt   string
-	}{cwd: cwd, threadID: threadID, prompt: prompt})
-	if f.err != nil {
-		return "", f.err
-	}
-	if f.replyOutput == "" {
-		f.replyOutput = "reply done"
-	}
-	return f.replyOutput, nil
 }
 
 type fakeTopicStore struct {
@@ -295,7 +244,6 @@ func TestHandleIncomingMessage_HelpCommand(t *testing.T) {
 	sender := &fakeMessageSender{}
 	svc := NewCommandService(CommandServiceDeps{
 		MCP:        &fakeMCPGateway{},
-		Codex:      &fakeCodexGateway{},
 		Sender:     sender,
 		TopicStore: newFakeTopicStore(),
 		Config: CommandServiceConfig{
@@ -327,7 +275,6 @@ func TestHandleIncomingMessage_HelpCommandMentionsMCPCallCodexStartsNewThread(t 
 	sender := &fakeMessageSender{}
 	svc := NewCommandService(CommandServiceDeps{
 		MCP:        &fakeMCPGateway{},
-		Codex:      &fakeCodexGateway{},
 		Sender:     sender,
 		TopicStore: newFakeTopicStore(),
 		Config: CommandServiceConfig{
@@ -363,7 +310,6 @@ func TestHandleIncomingMessage_LogsIncomingAndOutgoingMessageDetails(t *testing.
 	sender := &fakeMessageSender{}
 	svc := NewCommandService(CommandServiceDeps{
 		MCP:        &fakeMCPGateway{},
-		Codex:      &fakeCodexGateway{},
 		Sender:     sender,
 		TopicStore: newFakeTopicStore(),
 		Logger:     logger,
@@ -444,7 +390,6 @@ func TestHandleIncomingMessage_GroupCommandRequiresMention(t *testing.T) {
 	sender := &fakeMessageSender{}
 	svc := NewCommandService(CommandServiceDeps{
 		MCP:        &fakeMCPGateway{},
-		Codex:      &fakeCodexGateway{},
 		Sender:     sender,
 		TopicStore: newFakeTopicStore(),
 		Config:     CommandServiceConfig{BotOpenID: "ou_bot", Heartbeat: time.Hour},
@@ -470,10 +415,9 @@ func TestHandleIncomingMessage_GroupCommandRequiresMention(t *testing.T) {
 func TestHandleIncomingMessage_ProjectCommandBindsTopic(t *testing.T) {
 	topicStore := newFakeTopicStore()
 	sender := &fakeMessageSender{returnThread: "omt_new"}
-	codex := &fakeCodexGateway{startThreadID: "codex_t1", startOutput: "完成"}
+	mcp := &fakeMCPGateway{callText: "完成\n{\"threadId\":\"codex_t1\"}"}
 	svc := NewCommandService(CommandServiceDeps{
-		MCP:        &fakeMCPGateway{},
-		Codex:      codex,
+		MCP:        mcp,
 		Sender:     sender,
 		TopicStore: topicStore,
 		Config: CommandServiceConfig{
@@ -496,14 +440,33 @@ func TestHandleIncomingMessage_ProjectCommandBindsTopic(t *testing.T) {
 		t.Fatalf("HandleIncomingMessage error: %v", err)
 	}
 
-	if len(codex.startCalls) != 1 {
-		t.Fatalf("expected one codex start call, got %d", len(codex.startCalls))
+	if len(mcp.callHistory) != 1 {
+		t.Fatalf("expected one mcp tool call, got %d", len(mcp.callHistory))
 	}
-	if codex.startCalls[0].cwd != "/work/tidb" {
-		t.Fatalf("unexpected cwd: %q", codex.startCalls[0].cwd)
+	if mcp.callHistory[0].tool != "codex" {
+		t.Fatalf("expected codex tool call, got %q", mcp.callHistory[0].tool)
 	}
-	if !strings.Contains(codex.startCalls[0].prompt, "flaky") {
-		t.Fatalf("unexpected prompt: %q", codex.startCalls[0].prompt)
+	if gotCWD := mcp.callHistory[0].args["cwd"]; gotCWD != "/work/tidb" {
+		t.Fatalf("unexpected cwd arg: %#v", gotCWD)
+	}
+	if gotPrompt := mcp.callHistory[0].args["prompt"]; gotPrompt == nil || !strings.Contains(gotPrompt.(string), "flaky") {
+		t.Fatalf("unexpected prompt arg: %#v", gotPrompt)
+	}
+	if gotModel := mcp.callHistory[0].args["model"]; gotModel != "gpt-5.3-codex" {
+		t.Fatalf("unexpected model arg: %#v", gotModel)
+	}
+	if gotSandbox := mcp.callHistory[0].args["sandbox"]; gotSandbox != "danger-full-access" {
+		t.Fatalf("unexpected sandbox arg: %#v", gotSandbox)
+	}
+	if gotApproval := mcp.callHistory[0].args["approval-policy"]; gotApproval != "never" {
+		t.Fatalf("unexpected approval-policy arg: %#v", gotApproval)
+	}
+	rawConfig, ok := mcp.callHistory[0].args["config"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected config map in codex start args, got %#v", mcp.callHistory[0].args["config"])
+	}
+	if gotEffort := rawConfig["model_reasoning_effort"]; gotEffort != "xhigh" {
+		t.Fatalf("unexpected reasoning effort in config: %#v", gotEffort)
 	}
 
 	binding, ok := topicStore.Get("oc_chat", "omt_new")
@@ -536,11 +499,10 @@ func TestHandleIncomingMessage_TopicFollowupUsesBoundThread(t *testing.T) {
 		t.Fatalf("seed topic store: %v", err)
 	}
 
-	codex := &fakeCodexGateway{replyOutput: "followup ok"}
+	mcp := &fakeMCPGateway{callText: "followup ok"}
 	sender := &fakeMessageSender{}
 	svc := NewCommandService(CommandServiceDeps{
-		MCP:        &fakeMCPGateway{},
-		Codex:      codex,
+		MCP:        mcp,
 		Sender:     sender,
 		TopicStore: topicStore,
 		Config: CommandServiceConfig{
@@ -560,11 +522,14 @@ func TestHandleIncomingMessage_TopicFollowupUsesBoundThread(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleIncomingMessage error: %v", err)
 	}
-	if len(codex.replyCalls) != 1 {
-		t.Fatalf("expected one codex reply call, got %d", len(codex.replyCalls))
+	if len(mcp.callHistory) != 1 {
+		t.Fatalf("expected one mcp call, got %d", len(mcp.callHistory))
 	}
-	if codex.replyCalls[0].threadID != "codex_abc" {
-		t.Fatalf("unexpected codex thread id: %q", codex.replyCalls[0].threadID)
+	if mcp.callHistory[0].tool != "codex-reply" {
+		t.Fatalf("expected codex-reply tool, got %q", mcp.callHistory[0].tool)
+	}
+	if gotThreadID := mcp.callHistory[0].args["threadId"]; gotThreadID != "codex_abc" {
+		t.Fatalf("unexpected codex thread id arg: %#v", gotThreadID)
 	}
 }
 
@@ -572,7 +537,6 @@ func TestHandleIncomingMessage_MCPCallInvalidJSON(t *testing.T) {
 	sender := &fakeMessageSender{}
 	svc := NewCommandService(CommandServiceDeps{
 		MCP:        &fakeMCPGateway{},
-		Codex:      &fakeCodexGateway{},
 		Sender:     sender,
 		TopicStore: newFakeTopicStore(),
 		Config:     CommandServiceConfig{BotOpenID: "ou_bot", Heartbeat: time.Hour},
@@ -605,7 +569,6 @@ func TestHandleIncomingMessage_MCPCallToolErrorIsHandledWithoutPropagation(t *te
 		MCP: &fakeMCPGateway{
 			callErr: errors.New(`tool "codex" returned error: Failed to parse configuration for Codex tool: missing field "prompt"`),
 		},
-		Codex:      &fakeCodexGateway{},
 		Sender:     sender,
 		TopicStore: newFakeTopicStore(),
 		Config:     CommandServiceConfig{BotOpenID: "ou_bot", Heartbeat: time.Hour},
@@ -644,7 +607,6 @@ func TestHandleIncomingMessage_MCPCallCodexRequiresPrompt(t *testing.T) {
 	sender := &fakeMessageSender{}
 	svc := NewCommandService(CommandServiceDeps{
 		MCP:        mcp,
-		Codex:      &fakeCodexGateway{},
 		Sender:     sender,
 		TopicStore: newFakeTopicStore(),
 		Config:     CommandServiceConfig{BotOpenID: "ou_bot", Heartbeat: time.Hour},
@@ -679,7 +641,6 @@ func TestHandleIncomingMessage_MCPCallCodexExplainsNewThreadBehavior(t *testing.
 	sender := &fakeMessageSender{}
 	svc := NewCommandService(CommandServiceDeps{
 		MCP:        mcp,
-		Codex:      &fakeCodexGateway{},
 		Sender:     sender,
 		TopicStore: newFakeTopicStore(),
 		Config:     CommandServiceConfig{BotOpenID: "ou_bot", Heartbeat: time.Hour},
@@ -707,7 +668,7 @@ func TestHandleIncomingMessage_MCPCallCodexExplainsNewThreadBehavior(t *testing.
 	}
 }
 
-func TestHandleIncomingMessage_MCPCallCodexReusesTopicThread(t *testing.T) {
+func TestHandleIncomingMessage_MCPCallCodexDoesNotReuseTopicThread(t *testing.T) {
 	topicStore := newFakeTopicStore()
 	if err := topicStore.Upsert(TopicBinding{
 		ChatID:         "oc_chat",
@@ -724,7 +685,6 @@ func TestHandleIncomingMessage_MCPCallCodexReusesTopicThread(t *testing.T) {
 	sender := &fakeMessageSender{}
 	svc := NewCommandService(CommandServiceDeps{
 		MCP:        mcp,
-		Codex:      &fakeCodexGateway{},
 		Sender:     sender,
 		TopicStore: topicStore,
 		Config: CommandServiceConfig{
@@ -745,9 +705,8 @@ func TestHandleIncomingMessage_MCPCallCodexReusesTopicThread(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleIncomingMessage error: %v", err)
 	}
-	threadID, ok := mcp.calledWith.args["threadId"].(string)
-	if !ok || threadID != "codex_existing" {
-		t.Fatalf("expected injected codex thread id, got %#v", mcp.calledWith.args["threadId"])
+	if _, ok := mcp.calledWith.args["threadId"]; ok {
+		t.Fatalf("expected no injected codex thread id, got %#v", mcp.calledWith.args["threadId"])
 	}
 	binding, ok := topicStore.Get("oc_chat", "omt_topic")
 	if !ok {
@@ -758,12 +717,124 @@ func TestHandleIncomingMessage_MCPCallCodexReusesTopicThread(t *testing.T) {
 	}
 }
 
+func TestHandleIncomingMessage_MCPCallCodexStripsManualThreadID(t *testing.T) {
+	mcp := &fakeMCPGateway{
+		callText: "ok\n{\"threadId\":\"codex_new\"}",
+	}
+	sender := &fakeMessageSender{}
+	svc := NewCommandService(CommandServiceDeps{
+		MCP:        mcp,
+		Sender:     sender,
+		TopicStore: newFakeTopicStore(),
+		Config:     CommandServiceConfig{BotOpenID: "ou_bot", Heartbeat: time.Hour},
+	})
+
+	err := svc.HandleIncomingMessage(context.Background(), IncomingMessage{
+		ChatID:       "oc_chat",
+		ThreadID:     "omt_topic",
+		ChatType:     "group",
+		MessageID:    "om_1",
+		RawText:      `<at user_id="ou_bot"></at> /mcp call codex {"prompt":"pwd","threadId":"codex_old"}`,
+		MentionedIDs: []string{"ou_bot"},
+	})
+	if err != nil {
+		t.Fatalf("HandleIncomingMessage error: %v", err)
+	}
+	if _, ok := mcp.calledWith.args["threadId"]; ok {
+		t.Fatalf("expected threadId to be removed from codex start args, got %#v", mcp.calledWith.args["threadId"])
+	}
+}
+
+func TestHandleIncomingMessage_CodexSlashResetsTopicThreadForFollowups(t *testing.T) {
+	topicStore := newFakeTopicStore()
+	mcp := &fakeMCPGateway{
+		callTexts: []string{
+			"first\n{\"threadId\":\"codex_t1\"}",
+			"follow1",
+			"second\n{\"threadId\":\"codex_t2\"}",
+			"follow2",
+		},
+	}
+	sender := &fakeMessageSender{}
+	svc := NewCommandService(CommandServiceDeps{
+		MCP:        mcp,
+		Sender:     sender,
+		TopicStore: topicStore,
+		Config:     CommandServiceConfig{BotOpenID: "ou_bot", Heartbeat: time.Hour},
+	})
+
+	firstSlash := IncomingMessage{
+		ChatID:       "oc_chat",
+		ThreadID:     "omt_topic",
+		ChatType:     "group",
+		MessageID:    "om_1",
+		RawText:      `<at user_id="ou_bot"></at> /mcp call codex {"prompt":"first"}`,
+		MentionedIDs: []string{"ou_bot"},
+	}
+	if err := svc.HandleIncomingMessage(context.Background(), firstSlash); err != nil {
+		t.Fatalf("first slash command error: %v", err)
+	}
+	if err := svc.HandleIncomingMessage(context.Background(), IncomingMessage{
+		ChatID:    "oc_chat",
+		ThreadID:  "omt_topic",
+		ChatType:  "group",
+		MessageID: "om_2",
+		RawText:   "follow a",
+	}); err != nil {
+		t.Fatalf("first followup error: %v", err)
+	}
+	secondSlash := IncomingMessage{
+		ChatID:       "oc_chat",
+		ThreadID:     "omt_topic",
+		ChatType:     "group",
+		MessageID:    "om_3",
+		RawText:      `<at user_id="ou_bot"></at> /mcp call codex {"prompt":"second"}`,
+		MentionedIDs: []string{"ou_bot"},
+	}
+	if err := svc.HandleIncomingMessage(context.Background(), secondSlash); err != nil {
+		t.Fatalf("second slash command error: %v", err)
+	}
+	if err := svc.HandleIncomingMessage(context.Background(), IncomingMessage{
+		ChatID:    "oc_chat",
+		ThreadID:  "omt_topic",
+		ChatType:  "group",
+		MessageID: "om_4",
+		RawText:   "follow b",
+	}); err != nil {
+		t.Fatalf("second followup error: %v", err)
+	}
+
+	if len(mcp.callHistory) != 4 {
+		t.Fatalf("expected four mcp calls, got %d", len(mcp.callHistory))
+	}
+	if mcp.callHistory[0].tool != "codex" {
+		t.Fatalf("first call should be codex, got %q", mcp.callHistory[0].tool)
+	}
+	if mcp.callHistory[1].tool != "codex-reply" {
+		t.Fatalf("second call should be codex-reply, got %q", mcp.callHistory[1].tool)
+	}
+	if got := mcp.callHistory[1].args["threadId"]; got != "codex_t1" {
+		t.Fatalf("first followup should use codex_t1, got %#v", got)
+	}
+	if mcp.callHistory[2].tool != "codex" {
+		t.Fatalf("third call should be codex, got %q", mcp.callHistory[2].tool)
+	}
+	if _, ok := mcp.callHistory[2].args["threadId"]; ok {
+		t.Fatalf("second slash call should not inject threadId, got %#v", mcp.callHistory[2].args["threadId"])
+	}
+	if mcp.callHistory[3].tool != "codex-reply" {
+		t.Fatalf("fourth call should be codex-reply, got %q", mcp.callHistory[3].tool)
+	}
+	if got := mcp.callHistory[3].args["threadId"]; got != "codex_t2" {
+		t.Fatalf("second followup should use codex_t2, got %#v", got)
+	}
+}
+
 func TestHandleIncomingMessage_HeartbeatWhileProcessing(t *testing.T) {
 	sender := &fakeMessageSender{}
-	codex := &fakeCodexGateway{startThreadID: "codex_t", startOutput: "ok", delay: 80 * time.Millisecond}
+	mcp := &fakeMCPGateway{callText: "ok\n{\"threadId\":\"codex_t\"}", callDelay: 80 * time.Millisecond}
 	svc := NewCommandService(CommandServiceDeps{
-		MCP:        &fakeMCPGateway{},
-		Codex:      codex,
+		MCP:        mcp,
 		Sender:     sender,
 		TopicStore: newFakeTopicStore(),
 		Config: CommandServiceConfig{
@@ -811,8 +882,9 @@ func TestHandleIncomingMessage_HeartbeatWhileProcessing(t *testing.T) {
 func TestHandleIncomingMessage_DependencyErrorsReplyToUserWithoutPropagation(t *testing.T) {
 	sender := &fakeMessageSender{}
 	svc := NewCommandService(CommandServiceDeps{
-		MCP:        &fakeMCPGateway{},
-		Codex:      &fakeCodexGateway{err: errors.New("boom")},
+		MCP: &fakeMCPGateway{
+			callErr: errors.New("boom"),
+		},
 		Sender:     sender,
 		TopicStore: newFakeTopicStore(),
 		Config: CommandServiceConfig{
@@ -851,10 +923,8 @@ func TestHandleIncomingMessage_DependencyErrorsReplyToUserWithoutPropagation(t *
 
 func TestHandleIncomingMessage_UsesConfiguredStartReaction(t *testing.T) {
 	sender := &fakeMessageSender{}
-	codex := &fakeCodexGateway{startThreadID: "codex_t", startOutput: "ok"}
 	svc := NewCommandService(CommandServiceDeps{
-		MCP:        &fakeMCPGateway{},
-		Codex:      codex,
+		MCP:        &fakeMCPGateway{callText: "ok\n{\"threadId\":\"codex_t\"}"},
 		Sender:     sender,
 		TopicStore: newFakeTopicStore(),
 		Config: CommandServiceConfig{
