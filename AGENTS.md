@@ -38,3 +38,12 @@ as described in `PLANS.md` from design to implementation.
   1. Run `git fetch --prune` to remove stale remote branches.
   2. Pull the latest `main`.
   3. Switch to a fresh new working branch created from the updated `main`.
+
+# Shortcut Prompt
+
+- If the user's message clearly means "ship and reset" (for example `ship-and-reset`, `ship and reset`, `ship/reset`, `commit pr merge cleanup`, or close variants), run the full integration flow in one pass:
+  1. Run verification (`go test ./...`) and stop if it fails.
+  2. Stage all changes, commit with a concise diff-based message, and push the current branch.
+  3. Open a PR against `main` with title/description derived from the actual diff.
+  4. Merge the PR.
+  5. Run cleanup: `git fetch --prune`, pull latest `main`, and switch to a fresh `codex/` branch from updated `main`.

@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -115,11 +117,13 @@ type CommandService struct {
 var mentionTagPattern = regexp.MustCompile(`(?s)<at\b[^>]*>.*?</at>`)
 var projectCommandPattern = regexp.MustCompile(`^/([a-zA-Z0-9_-]+)\s+(.+)$`)
 var codexThreadIDPattern = regexp.MustCompile(`(?i)"thread(?:_|)id"\s*:\s*"([^"]+)"`)
+var tokenUsagePattern = regexp.MustCompile(`(?i)([0-9][0-9,._]*)\s*/\s*([0-9][0-9,._]*)\s*(?:tokens?)`)
 
 const (
 	processingStartReactionType = "OnIt"
 	codexToolName               = "codex"
 	codexReplyToolName          = "codex-reply"
+	codexStatusToolName         = "codex-status"
 	mcpCodexTopicAlias          = "__mcp_codex__"
 	defaultHelpMessage          = "可用命令：\n/help\n/mcp tools\n/mcp schema <tool>\n/mcp call <tool> <json>\n/<project> <prompt>\n\n提示：/mcp call codex 每次都会新建 Codex 线程。"
 	codexPromptHelpMessage      = `用法：/mcp call codex {"prompt":"<你的问题>"}`
@@ -306,16 +310,18 @@ func (s *CommandService) handleSlashCommand(ctx context.Context, msg IncomingMes
 			if runErr != nil {
 				return commandOutcome{}, runErr
 			}
+			codexThreadID := strings.TrimSpace(parseCodexThreadID(output))
 			return commandOutcome{
 				text:          output,
-				codexThreadID: strings.TrimSpace(parseCodexThreadID(output)),
+				codexThreadID: codexThreadID,
+				tokenUsage:    s.resolveCodexContextWindowUsage(runCtx, codexThreadID, msgLogger),
 				projectAlias:  alias,
 			}, nil
 		})
 		if err != nil {
 			return s.replyCommandFailure(ctx, msg, "执行失败", err)
 		}
-		finalReceipt, err := s.send(ctx, msg, formatCodexOutput(outcome.text, outcome.codexThreadID))
+		finalReceipt, err := s.send(ctx, msg, formatCodexOutput(outcome.text, outcome.codexThreadID, outcome.tokenUsage))
 		if err != nil {
 			return err
 		}
@@ -398,9 +404,15 @@ func (s *CommandService) handleMCPCall(ctx context.Context, msg IncomingMessage,
 		if runErr != nil {
 			return commandOutcome{}, runErr
 		}
+		codexThreadID := strings.TrimSpace(parseCodexThreadID(result))
+		tokenUsage := ""
+		if strings.EqualFold(tool, codexToolName) {
+			tokenUsage = s.resolveCodexContextWindowUsage(runCtx, codexThreadID, msgLogger)
+		}
 		return commandOutcome{
 			text:          result,
-			codexThreadID: strings.TrimSpace(parseCodexThreadID(result)),
+			codexThreadID: codexThreadID,
+			tokenUsage:    tokenUsage,
 		}, nil
 	})
 	if err != nil {
@@ -408,7 +420,7 @@ func (s *CommandService) handleMCPCall(ctx context.Context, msg IncomingMessage,
 	}
 	responseText := normalizeOutput(outcome.text)
 	if strings.EqualFold(tool, codexToolName) {
-		responseText = formatCodexOutput(outcome.text, outcome.codexThreadID, codexNewThreadNotice)
+		responseText = formatCodexOutput(outcome.text, outcome.codexThreadID, outcome.tokenUsage, codexNewThreadNotice)
 	}
 	finalReceipt, err := s.send(ctx, msg, responseText)
 	if err != nil {
@@ -442,6 +454,7 @@ func (s *CommandService) handleTopicFollowup(ctx context.Context, msg IncomingMe
 		return commandOutcome{
 			text:          output,
 			codexThreadID: resolvedThreadID,
+			tokenUsage:    s.resolveCodexContextWindowUsage(runCtx, resolvedThreadID, msgLogger),
 			projectAlias:  strings.ToLower(strings.TrimSpace(binding.ProjectAlias)),
 		}, nil
 	})
@@ -461,13 +474,18 @@ func (s *CommandService) handleTopicFollowup(ctx context.Context, msg IncomingMe
 		)
 
 		outcome, err = s.executeWithHeartbeat(ctx, msg, func(runCtx context.Context) (commandOutcome, error) {
-			return s.startNewCodexSessionFromFollowup(runCtx, cleanText, binding, threadID)
+			nextOutcome, runErr := s.startNewCodexSessionFromFollowup(runCtx, cleanText, binding, threadID)
+			if runErr != nil {
+				return commandOutcome{}, runErr
+			}
+			nextOutcome.tokenUsage = s.resolveCodexContextWindowUsage(runCtx, nextOutcome.codexThreadID, msgLogger)
+			return nextOutcome, nil
 		})
 		if err != nil {
 			return s.replyCommandFailure(ctx, msg, "执行失败", err)
 		}
 	}
-	finalReceipt, err := s.send(ctx, msg, formatCodexOutput(outcome.text, outcome.codexThreadID))
+	finalReceipt, err := s.send(ctx, msg, formatCodexOutput(outcome.text, outcome.codexThreadID, outcome.tokenUsage))
 	if err != nil {
 		return err
 	}
@@ -527,6 +545,7 @@ func (s *CommandService) startNewCodexSessionFromFollowup(ctx context.Context, p
 type commandOutcome struct {
 	text          string
 	codexThreadID string
+	tokenUsage    string
 	projectAlias  string
 }
 
@@ -694,7 +713,7 @@ func normalizeOutput(output string) string {
 	return output
 }
 
-func formatCodexOutput(output, codexThreadID string, notices ...string) string {
+func formatCodexOutput(output, codexThreadID, tokenUsage string, notices ...string) string {
 	body := strings.TrimSpace(output)
 	if content, extractedThreadID, ok := extractCodexStructuredPayload(output); ok {
 		if strings.TrimSpace(content) != "" {
@@ -708,11 +727,275 @@ func formatCodexOutput(output, codexThreadID string, notices ...string) string {
 	for _, notice := range notices {
 		body = appendTextNotice(body, notice)
 	}
+	tokenUsage = strings.TrimSpace(tokenUsage)
 	codexThreadID = strings.TrimSpace(codexThreadID)
+	footer := make([]string, 0, 2)
+	if tokenUsage != "" {
+		footer = append(footer, fmt.Sprintf("context_window: %s", tokenUsage))
+	}
 	if codexThreadID != "" {
-		body = appendTextNotice(body, fmt.Sprintf("线程信息：\ncodex_thread_id: %s", codexThreadID))
+		footer = append(footer, fmt.Sprintf("codex_thread_id: %s", codexThreadID))
+	}
+	if len(footer) > 0 {
+		body = appendTextNotice(body, "线程信息：\n"+strings.Join(footer, "\n"))
 	}
 	return normalizeOutput(body)
+}
+
+type codexContextWindowUsage struct {
+	UsedTokens int64
+	MaxTokens  int64
+}
+
+func (s *CommandService) resolveCodexContextWindowUsage(ctx context.Context, codexThreadID string, logger *zap.Logger) string {
+	codexThreadID = strings.TrimSpace(codexThreadID)
+	if codexThreadID == "" {
+		return ""
+	}
+
+	statusOutput, err := s.mcp.CallTool(ctx, codexStatusToolName, map[string]any{
+		"threadId": codexThreadID,
+	})
+	if err != nil {
+		if logger != nil {
+			logger.Debug("skip codex context window footer because codex-status failed", zap.String("codex_thread_id", codexThreadID), zap.Error(err))
+		}
+		return ""
+	}
+
+	usage, ok := parseCodexContextWindowUsage(statusOutput)
+	if !ok {
+		if logger != nil {
+			logger.Debug("skip codex context window footer because codex-status output is not parseable", zap.String("codex_thread_id", codexThreadID))
+		}
+		return ""
+	}
+	return formatContextWindowUsage(usage)
+}
+
+func parseCodexContextWindowUsage(output string) (codexContextWindowUsage, bool) {
+	trimmed := strings.TrimSpace(output)
+	if trimmed == "" {
+		return codexContextWindowUsage{}, false
+	}
+
+	if payload, ok := decodeJSONObject(trimmed); ok {
+		if usage, found := findCodexContextWindowUsage(payload); found {
+			return usage, true
+		}
+	}
+
+	if payload, ok := extractTrailingJSONObject(trimmed); ok {
+		if usage, found := findCodexContextWindowUsage(payload); found {
+			return usage, true
+		}
+	}
+
+	matches := tokenUsagePattern.FindStringSubmatch(trimmed)
+	if len(matches) != 3 {
+		return codexContextWindowUsage{}, false
+	}
+	usedTokens, okUsed := parseTokenCount(matches[1])
+	maxTokens, okMax := parseTokenCount(matches[2])
+	if !okUsed || !okMax || maxTokens <= 0 {
+		return codexContextWindowUsage{}, false
+	}
+	return codexContextWindowUsage{UsedTokens: usedTokens, MaxTokens: maxTokens}, true
+}
+
+func decodeJSONObject(text string) (map[string]any, bool) {
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(text), &payload); err != nil {
+		return nil, false
+	}
+	return payload, true
+}
+
+func extractTrailingJSONObject(text string) (map[string]any, bool) {
+	start := strings.LastIndex(text, "\n{")
+	if start >= 0 {
+		start++
+	} else if strings.HasPrefix(text, "{") {
+		start = 0
+	} else {
+		return nil, false
+	}
+	return decodeJSONObject(strings.TrimSpace(text[start:]))
+}
+
+func findCodexContextWindowUsage(value any) (codexContextWindowUsage, bool) {
+	switch typed := value.(type) {
+	case map[string]any:
+		if usage, ok := codexContextWindowUsageFromMap(typed); ok {
+			return usage, true
+		}
+		for _, key := range []string{
+			"contextWindow",
+			"context_window",
+			"contextWindowUsage",
+			"context_window_usage",
+			"usage",
+			"tokenUsage",
+			"token_usage",
+		} {
+			nested, exists := typed[key]
+			if !exists {
+				continue
+			}
+			if usage, ok := findCodexContextWindowUsage(nested); ok {
+				return usage, true
+			}
+		}
+		for _, nested := range typed {
+			if usage, ok := findCodexContextWindowUsage(nested); ok {
+				return usage, true
+			}
+		}
+	case []any:
+		for _, nested := range typed {
+			if usage, ok := findCodexContextWindowUsage(nested); ok {
+				return usage, true
+			}
+		}
+	}
+	return codexContextWindowUsage{}, false
+}
+
+func codexContextWindowUsageFromMap(payload map[string]any) (codexContextWindowUsage, bool) {
+	usedTokens, okUsed := numericMapValue(payload,
+		"usedTokens",
+		"used_tokens",
+		"tokensUsed",
+		"tokens_used",
+		"used",
+	)
+	maxTokens, okMax := numericMapValue(payload,
+		"maxTokens",
+		"max_tokens",
+		"tokenLimit",
+		"token_limit",
+		"contextWindowTokens",
+		"context_window_tokens",
+		"max",
+		"total",
+	)
+	if !okUsed || !okMax || maxTokens <= 0 {
+		return codexContextWindowUsage{}, false
+	}
+	return codexContextWindowUsage{
+		UsedTokens: usedTokens,
+		MaxTokens:  maxTokens,
+	}, true
+}
+
+func numericMapValue(payload map[string]any, keys ...string) (int64, bool) {
+	for _, key := range keys {
+		value, ok := payload[key]
+		if !ok || value == nil {
+			continue
+		}
+		number, valid := numericValue(value)
+		if !valid {
+			continue
+		}
+		return number, true
+	}
+	return 0, false
+}
+
+func numericValue(value any) (int64, bool) {
+	switch typed := value.(type) {
+	case int:
+		return int64(typed), true
+	case int8:
+		return int64(typed), true
+	case int16:
+		return int64(typed), true
+	case int32:
+		return int64(typed), true
+	case int64:
+		return typed, true
+	case uint:
+		return int64(typed), true
+	case uint8:
+		return int64(typed), true
+	case uint16:
+		return int64(typed), true
+	case uint32:
+		return int64(typed), true
+	case uint64:
+		if typed > math.MaxInt64 {
+			return 0, false
+		}
+		return int64(typed), true
+	case float32:
+		return int64(math.Round(float64(typed))), true
+	case float64:
+		return int64(math.Round(typed)), true
+	case json.Number:
+		if intValue, err := typed.Int64(); err == nil {
+			return intValue, true
+		}
+		floatValue, err := typed.Float64()
+		if err != nil {
+			return 0, false
+		}
+		return int64(math.Round(floatValue)), true
+	case string:
+		return parseTokenCount(typed)
+	default:
+		return 0, false
+	}
+}
+
+func parseTokenCount(raw string) (int64, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, false
+	}
+	cleaned := strings.ReplaceAll(raw, ",", "")
+	cleaned = strings.ReplaceAll(cleaned, "_", "")
+	if cleaned == "" {
+		return 0, false
+	}
+	number, err := strconv.ParseInt(cleaned, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return number, true
+}
+
+func formatContextWindowUsage(usage codexContextWindowUsage) string {
+	usedTokens := usage.UsedTokens
+	maxTokens := usage.MaxTokens
+	if maxTokens <= 0 {
+		return ""
+	}
+	if usedTokens < 0 {
+		usedTokens = 0
+	}
+	if usedTokens > maxTokens {
+		usedTokens = maxTokens
+	}
+	leftRatio := float64(maxTokens-usedTokens) / float64(maxTokens)
+	leftPercent := int(math.Round(leftRatio * 100))
+	if leftPercent < 0 {
+		leftPercent = 0
+	}
+	if leftPercent > 100 {
+		leftPercent = 100
+	}
+	return fmt.Sprintf("%s / %s tokens used (%d%% left)", formatTokenCountCompact(usedTokens), formatTokenCountCompact(maxTokens), leftPercent)
+}
+
+func formatTokenCountCompact(tokens int64) string {
+	if tokens < 0 {
+		tokens = 0
+	}
+	if tokens < 1000 {
+		return fmt.Sprintf("%d", tokens)
+	}
+	return fmt.Sprintf("%dK", int(math.Round(float64(tokens)/1000)))
 }
 
 func extractCodexStructuredPayload(output string) (content string, threadID string, ok bool) {

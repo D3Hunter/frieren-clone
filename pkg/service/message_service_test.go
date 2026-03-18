@@ -34,7 +34,7 @@ func TestFormatCodexOutput_RemovesStructuredPayloadAndKeepsMarkdown(t *testing.T
 	}
 
 	rawOutput := content + "\n" + string(encodedPayload)
-	got := formatCodexOutput(rawOutput, "")
+	got := formatCodexOutput(rawOutput, "", "")
 
 	if strings.Contains(got, `"content"`) {
 		t.Fatalf("expected structured payload removed from output, got %q", got)
@@ -53,6 +53,40 @@ func TestFormatCodexOutput_RemovesStructuredPayloadAndKeepsMarkdown(t *testing.T
 	}
 	if !strings.HasSuffix(strings.TrimSpace(got), "codex_thread_id: codex_t1") {
 		t.Fatalf("expected thread id at bottom of output, got %q", got)
+	}
+}
+
+func TestFormatCodexOutput_AppendsContextWindowUsageToFooter(t *testing.T) {
+	got := formatCodexOutput("done", "codex_t1", "123K / 272K tokens used (55% left)")
+
+	if !strings.Contains(got, "context_window: 123K / 272K tokens used (55% left)") {
+		t.Fatalf("expected context window footer, got %q", got)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(got), "codex_thread_id: codex_t1") {
+		t.Fatalf("expected thread id to remain in footer, got %q", got)
+	}
+}
+
+func TestParseCodexContextWindowUsage_FromStructuredJSON(t *testing.T) {
+	raw := "status ok\n{\n  \"contextWindow\": {\n    \"usedTokens\": 123456,\n    \"maxTokens\": 272000\n  }\n}"
+
+	usage, ok := parseCodexContextWindowUsage(raw)
+	if !ok {
+		t.Fatalf("expected usage parsed, got %#v", usage)
+	}
+	if usage.UsedTokens != 123456 || usage.MaxTokens != 272000 {
+		t.Fatalf("unexpected usage parsed: %#v", usage)
+	}
+}
+
+func TestFormatContextWindowUsage(t *testing.T) {
+	got := formatContextWindowUsage(codexContextWindowUsage{
+		UsedTokens: 123456,
+		MaxTokens:  272000,
+	})
+
+	if got != "123K / 272K tokens used (55% left)" {
+		t.Fatalf("unexpected usage text: %q", got)
 	}
 }
 

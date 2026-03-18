@@ -114,14 +114,32 @@ func TestHandleIncomingMessage_MCPCallCodexAlwaysStartsNewThreadWithinTopic(t *t
 		t.Fatalf("second HandleIncomingMessage error: %v", err)
 	}
 
-	if len(mcp.callHistory) != 2 {
-		t.Fatalf("expected two codex calls, got %d", len(mcp.callHistory))
+	if len(mcp.callHistory) != 4 {
+		t.Fatalf("expected two codex calls and two codex-status calls, got %d", len(mcp.callHistory))
+	}
+	if mcp.callHistory[0].tool != codexToolName {
+		t.Fatalf("expected first call to codex, got %q", mcp.callHistory[0].tool)
 	}
 	if _, ok := mcp.callHistory[0].args["threadId"]; ok {
 		t.Fatalf("expected first call without injected threadId, got %#v", mcp.callHistory[0].args["threadId"])
 	}
-	if _, ok := mcp.callHistory[1].args["threadId"]; ok {
-		t.Fatalf("expected second call without injected threadId, got %#v", mcp.callHistory[1].args["threadId"])
+	if mcp.callHistory[1].tool != codexStatusToolName {
+		t.Fatalf("expected second call to codex-status, got %q", mcp.callHistory[1].tool)
+	}
+	if got := mcp.callHistory[1].args["threadId"]; got != "codex_t1" {
+		t.Fatalf("expected codex-status to use codex_t1, got %#v", got)
+	}
+	if mcp.callHistory[2].tool != codexToolName {
+		t.Fatalf("expected third call to codex, got %q", mcp.callHistory[2].tool)
+	}
+	if _, ok := mcp.callHistory[2].args["threadId"]; ok {
+		t.Fatalf("expected second codex call without injected threadId, got %#v", mcp.callHistory[2].args["threadId"])
+	}
+	if mcp.callHistory[3].tool != codexStatusToolName {
+		t.Fatalf("expected fourth call to codex-status, got %q", mcp.callHistory[3].tool)
+	}
+	if got := mcp.callHistory[3].args["threadId"]; got != "codex_t1" {
+		t.Fatalf("expected codex-status to use codex_t1, got %#v", got)
 	}
 }
 
@@ -182,11 +200,17 @@ func TestHandleIncomingMessage_MCPCallCodexPersistsTopicThreadForFollowupWithout
 		t.Fatalf("second HandleIncomingMessage error: %v", err)
 	}
 
-	if len(secondMCP.callHistory) != 1 {
-		t.Fatalf("expected one call on second service, got %d", len(secondMCP.callHistory))
+	if len(secondMCP.callHistory) != 2 {
+		t.Fatalf("expected codex + codex-status calls on second service, got %d", len(secondMCP.callHistory))
+	}
+	if secondMCP.callHistory[0].tool != codexToolName {
+		t.Fatalf("expected first call to codex, got %q", secondMCP.callHistory[0].tool)
 	}
 	if _, ok := secondMCP.callHistory[0].args["threadId"]; ok {
 		t.Fatalf("expected no injected threadId, got %#v", secondMCP.callHistory[0].args["threadId"])
+	}
+	if secondMCP.callHistory[1].tool != codexStatusToolName {
+		t.Fatalf("expected second call to codex-status, got %q", secondMCP.callHistory[1].tool)
 	}
 }
 
@@ -449,8 +473,8 @@ func TestHandleIncomingMessage_ProjectCommandBindsTopic(t *testing.T) {
 		t.Fatalf("HandleIncomingMessage error: %v", err)
 	}
 
-	if len(mcp.callHistory) != 1 {
-		t.Fatalf("expected one mcp tool call, got %d", len(mcp.callHistory))
+	if len(mcp.callHistory) != 2 {
+		t.Fatalf("expected codex + codex-status calls, got %d", len(mcp.callHistory))
 	}
 	if mcp.callHistory[0].tool != "codex" {
 		t.Fatalf("expected codex tool call, got %q", mcp.callHistory[0].tool)
@@ -476,6 +500,12 @@ func TestHandleIncomingMessage_ProjectCommandBindsTopic(t *testing.T) {
 	}
 	if gotEffort := rawConfig["model_reasoning_effort"]; gotEffort != "xhigh" {
 		t.Fatalf("unexpected reasoning effort in config: %#v", gotEffort)
+	}
+	if mcp.callHistory[1].tool != codexStatusToolName {
+		t.Fatalf("expected second call to codex-status, got %q", mcp.callHistory[1].tool)
+	}
+	if gotThreadID := mcp.callHistory[1].args["threadId"]; gotThreadID != "codex_t1" {
+		t.Fatalf("expected codex-status to use codex_t1, got %#v", gotThreadID)
 	}
 
 	binding, ok := topicStore.Get("oc_chat", "omt_new")
@@ -508,7 +538,12 @@ func TestHandleIncomingMessage_ProjectCommandFormatsCodexOutputForFeishuText(t *
 	}
 
 	sender := &fakeMessageSender{}
-	mcp := &fakeMCPGateway{callText: content + "\n" + string(encodedPayload)}
+	mcp := &fakeMCPGateway{
+		callTexts: []string{
+			content + "\n" + string(encodedPayload),
+			`{"contextWindow":{"usedTokens":123456,"maxTokens":272000}}`,
+		},
+	}
 	svc := NewCommandService(CommandServiceDeps{
 		MCP:        mcp,
 		Sender:     sender,
@@ -543,6 +578,9 @@ func TestHandleIncomingMessage_ProjectCommandFormatsCodexOutputForFeishuText(t *
 	if !strings.Contains(got, "线程信息：") {
 		t.Fatalf("expected thread info section, got %q", got)
 	}
+	if !strings.Contains(got, "context_window: 123K / 272K tokens used (55% left)") {
+		t.Fatalf("expected context window usage footer, got %q", got)
+	}
 	if !strings.HasSuffix(strings.TrimSpace(got), "codex_thread_id: codex_t1") {
 		t.Fatalf("expected thread id in bottom section, got %q", got)
 	}
@@ -559,7 +597,12 @@ func TestHandleIncomingMessage_TopicFollowupUsesBoundThread(t *testing.T) {
 		t.Fatalf("seed topic store: %v", err)
 	}
 
-	mcp := &fakeMCPGateway{callText: "followup ok"}
+	mcp := &fakeMCPGateway{
+		callTexts: []string{
+			"followup ok",
+			`{"contextWindow":{"usedTokens":100000,"maxTokens":272000}}`,
+		},
+	}
 	sender := &fakeMessageSender{}
 	svc := NewCommandService(CommandServiceDeps{
 		MCP:        mcp,
@@ -582,14 +625,23 @@ func TestHandleIncomingMessage_TopicFollowupUsesBoundThread(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleIncomingMessage error: %v", err)
 	}
-	if len(mcp.callHistory) != 1 {
-		t.Fatalf("expected one mcp call, got %d", len(mcp.callHistory))
+	if len(mcp.callHistory) != 2 {
+		t.Fatalf("expected codex-reply + codex-status calls, got %d", len(mcp.callHistory))
 	}
 	if mcp.callHistory[0].tool != "codex-reply" {
 		t.Fatalf("expected codex-reply tool, got %q", mcp.callHistory[0].tool)
 	}
 	if gotThreadID := mcp.callHistory[0].args["threadId"]; gotThreadID != "codex_abc" {
 		t.Fatalf("unexpected codex thread id arg: %#v", gotThreadID)
+	}
+	if mcp.callHistory[1].tool != codexStatusToolName {
+		t.Fatalf("expected codex-status tool, got %q", mcp.callHistory[1].tool)
+	}
+	if gotThreadID := mcp.callHistory[1].args["threadId"]; gotThreadID != "codex_abc" {
+		t.Fatalf("unexpected codex-status thread id arg: %#v", gotThreadID)
+	}
+	if len(sender.messages) == 0 || !strings.Contains(sender.messages[len(sender.messages)-1].Text, "context_window: 100K / 272K tokens used (63% left)") {
+		t.Fatalf("expected context window footer on follow-up response, got %+v", sender.messages)
 	}
 }
 
@@ -633,8 +685,8 @@ func TestHandleIncomingMessage_TopicFollowupSessionTimeoutNotifiesAndStartsNewTh
 	if err != nil {
 		t.Fatalf("HandleIncomingMessage error: %v", err)
 	}
-	if len(mcp.callHistory) != 2 {
-		t.Fatalf("expected two mcp calls, got %d", len(mcp.callHistory))
+	if len(mcp.callHistory) != 3 {
+		t.Fatalf("expected codex-reply failure + codex + codex-status calls, got %d", len(mcp.callHistory))
 	}
 	if mcp.callHistory[0].tool != "codex-reply" {
 		t.Fatalf("first call should be codex-reply, got %q", mcp.callHistory[0].tool)
@@ -647,6 +699,12 @@ func TestHandleIncomingMessage_TopicFollowupSessionTimeoutNotifiesAndStartsNewTh
 	}
 	if got := mcp.callHistory[1].args["cwd"]; got != "/work/tidb" {
 		t.Fatalf("second call should include project cwd, got %#v", got)
+	}
+	if mcp.callHistory[2].tool != codexStatusToolName {
+		t.Fatalf("third call should be codex-status, got %q", mcp.callHistory[2].tool)
+	}
+	if got := mcp.callHistory[2].args["threadId"]; got != "codex_new" {
+		t.Fatalf("codex-status should use codex_new thread, got %#v", got)
 	}
 	if len(sender.messages) != 2 {
 		t.Fatalf("expected session-reset notice and final response, got %d messages", len(sender.messages))
@@ -841,8 +899,14 @@ func TestHandleIncomingMessage_MCPCallCodexDoesNotReuseTopicThread(t *testing.T)
 	if err != nil {
 		t.Fatalf("HandleIncomingMessage error: %v", err)
 	}
-	if _, ok := mcp.calledWith.args["threadId"]; ok {
-		t.Fatalf("expected no injected codex thread id, got %#v", mcp.calledWith.args["threadId"])
+	if len(mcp.callHistory) < 2 {
+		t.Fatalf("expected codex + codex-status calls, got %d", len(mcp.callHistory))
+	}
+	if mcp.callHistory[0].tool != codexToolName {
+		t.Fatalf("expected first call to codex, got %q", mcp.callHistory[0].tool)
+	}
+	if _, ok := mcp.callHistory[0].args["threadId"]; ok {
+		t.Fatalf("expected no injected codex thread id, got %#v", mcp.callHistory[0].args["threadId"])
 	}
 	binding, ok := topicStore.Get("oc_chat", "omt_topic")
 	if !ok {
@@ -876,8 +940,14 @@ func TestHandleIncomingMessage_MCPCallCodexStripsManualThreadID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleIncomingMessage error: %v", err)
 	}
-	if _, ok := mcp.calledWith.args["threadId"]; ok {
-		t.Fatalf("expected threadId to be removed from codex start args, got %#v", mcp.calledWith.args["threadId"])
+	if len(mcp.callHistory) < 1 {
+		t.Fatalf("expected at least one tool call")
+	}
+	if mcp.callHistory[0].tool != codexToolName {
+		t.Fatalf("expected first call to codex, got %q", mcp.callHistory[0].tool)
+	}
+	if _, ok := mcp.callHistory[0].args["threadId"]; ok {
+		t.Fatalf("expected threadId to be removed from codex start args, got %#v", mcp.callHistory[0].args["threadId"])
 	}
 }
 
@@ -886,9 +956,13 @@ func TestHandleIncomingMessage_CodexSlashResetsTopicThreadForFollowups(t *testin
 	mcp := &fakeMCPGateway{
 		callTexts: []string{
 			"first\n{\"threadId\":\"codex_t1\"}",
+			`{"contextWindow":{"usedTokens":50000,"maxTokens":272000}}`,
 			"follow1",
+			`{"contextWindow":{"usedTokens":60000,"maxTokens":272000}}`,
 			"second\n{\"threadId\":\"codex_t2\"}",
+			`{"contextWindow":{"usedTokens":70000,"maxTokens":272000}}`,
 			"follow2",
+			`{"contextWindow":{"usedTokens":80000,"maxTokens":272000}}`,
 		},
 	}
 	sender := &fakeMessageSender{}
@@ -940,29 +1014,53 @@ func TestHandleIncomingMessage_CodexSlashResetsTopicThreadForFollowups(t *testin
 		t.Fatalf("second followup error: %v", err)
 	}
 
-	if len(mcp.callHistory) != 4 {
-		t.Fatalf("expected four mcp calls, got %d", len(mcp.callHistory))
+	if len(mcp.callHistory) != 8 {
+		t.Fatalf("expected four codex calls plus four codex-status calls, got %d", len(mcp.callHistory))
 	}
 	if mcp.callHistory[0].tool != "codex" {
 		t.Fatalf("first call should be codex, got %q", mcp.callHistory[0].tool)
 	}
-	if mcp.callHistory[1].tool != "codex-reply" {
-		t.Fatalf("second call should be codex-reply, got %q", mcp.callHistory[1].tool)
+	if mcp.callHistory[1].tool != codexStatusToolName {
+		t.Fatalf("second call should be codex-status, got %q", mcp.callHistory[1].tool)
 	}
 	if got := mcp.callHistory[1].args["threadId"]; got != "codex_t1" {
+		t.Fatalf("first codex-status should use codex_t1, got %#v", got)
+	}
+	if mcp.callHistory[2].tool != "codex-reply" {
+		t.Fatalf("third call should be codex-reply, got %q", mcp.callHistory[2].tool)
+	}
+	if got := mcp.callHistory[2].args["threadId"]; got != "codex_t1" {
 		t.Fatalf("first followup should use codex_t1, got %#v", got)
 	}
-	if mcp.callHistory[2].tool != "codex" {
-		t.Fatalf("third call should be codex, got %q", mcp.callHistory[2].tool)
+	if mcp.callHistory[3].tool != codexStatusToolName {
+		t.Fatalf("fourth call should be codex-status, got %q", mcp.callHistory[3].tool)
 	}
-	if _, ok := mcp.callHistory[2].args["threadId"]; ok {
-		t.Fatalf("second slash call should not inject threadId, got %#v", mcp.callHistory[2].args["threadId"])
+	if got := mcp.callHistory[3].args["threadId"]; got != "codex_t1" {
+		t.Fatalf("second codex-status should use codex_t1, got %#v", got)
 	}
-	if mcp.callHistory[3].tool != "codex-reply" {
-		t.Fatalf("fourth call should be codex-reply, got %q", mcp.callHistory[3].tool)
+	if mcp.callHistory[4].tool != "codex" {
+		t.Fatalf("fifth call should be codex, got %q", mcp.callHistory[4].tool)
 	}
-	if got := mcp.callHistory[3].args["threadId"]; got != "codex_t2" {
+	if _, ok := mcp.callHistory[4].args["threadId"]; ok {
+		t.Fatalf("second slash call should not inject threadId, got %#v", mcp.callHistory[4].args["threadId"])
+	}
+	if mcp.callHistory[5].tool != codexStatusToolName {
+		t.Fatalf("sixth call should be codex-status, got %q", mcp.callHistory[5].tool)
+	}
+	if got := mcp.callHistory[5].args["threadId"]; got != "codex_t2" {
+		t.Fatalf("third codex-status should use codex_t2, got %#v", got)
+	}
+	if mcp.callHistory[6].tool != "codex-reply" {
+		t.Fatalf("seventh call should be codex-reply, got %q", mcp.callHistory[6].tool)
+	}
+	if got := mcp.callHistory[6].args["threadId"]; got != "codex_t2" {
 		t.Fatalf("second followup should use codex_t2, got %#v", got)
+	}
+	if mcp.callHistory[7].tool != codexStatusToolName {
+		t.Fatalf("eighth call should be codex-status, got %q", mcp.callHistory[7].tool)
+	}
+	if got := mcp.callHistory[7].args["threadId"]; got != "codex_t2" {
+		t.Fatalf("fourth codex-status should use codex_t2, got %#v", got)
 	}
 }
 
