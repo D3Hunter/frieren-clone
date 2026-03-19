@@ -3,6 +3,10 @@
 Date: 2026-03-17
 Status: Implemented (source-of-truth as-built spec)
 
+Related references:
+
+- `docs/specs/2026-03-19-feishu-mcp-id-glossary.md` (ID glossary and thread/topic mapping walkthrough)
+
 ## 1) Goal and scope
 
 Convert the bot from simple echo/default-reply mode into a command-driven workflow that:
