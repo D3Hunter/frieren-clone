@@ -386,6 +386,53 @@ func TestSend_CodexMarkdownModeUsesSafeChunkSizeForInteractiveCards(t *testing.T
 	}
 }
 
+func TestSend_CodexMarkdownModeMultiChunkKeepsHeadingAtChunkStart(t *testing.T) {
+	api := &fakeMessageAPI{}
+	s := NewTextSender(api, &fakeReactionAPI{})
+
+	input := "# Markdown Capability Demo (H1, Level 1)\n\n" +
+		strings.Repeat("Markdown chunking should preserve heading rendering fidelity. ", 120)
+
+	_, err := s.Send(context.Background(), SendRequest{
+		ChatID:           "oc_x",
+		ReplyToMessageID: "om_msg",
+		Text:             input,
+		RenderMode:       string(renderModeCodexMarkdown),
+	})
+	if err != nil {
+		t.Fatalf("Send error: %v", err)
+	}
+	if len(api.replyReqs) < 2 {
+		t.Fatalf("expected markdown response to split into multiple chunks, got %d", len(api.replyReqs))
+	}
+	if api.replyReqs[0].Body == nil || api.replyReqs[0].Body.Content == nil {
+		t.Fatal("expected first chunk content")
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(*api.replyReqs[0].Body.Content), &payload); err != nil {
+		t.Fatalf("expected valid interactive payload: %v", err)
+	}
+	body, ok := payload["body"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected body object, got %#v", payload["body"])
+	}
+	elements, ok := body["elements"].([]any)
+	if !ok || len(elements) == 0 {
+		t.Fatalf("expected non-empty body elements, got %#v", body["elements"])
+	}
+	md, ok := elements[0].(map[string]any)["content"].(string)
+	if !ok {
+		t.Fatalf("expected markdown content string, got %#v", elements[0])
+	}
+	if !strings.HasPrefix(strings.TrimSpace(md), "## Markdown Capability Demo (H1, Level 1)") {
+		t.Fatalf("expected first markdown chunk to start with heading, got %q", md)
+	}
+	if !strings.Contains(md, "[1/") {
+		t.Fatalf("expected first chunk to include ordering marker, got %q", md)
+	}
+}
+
 func TestSend_DefaultModeKeepsMarkdownAsPlainText(t *testing.T) {
 	api := &fakeMessageAPI{}
 	s := NewTextSender(api, &fakeReactionAPI{})
@@ -521,6 +568,38 @@ func TestSplitMarkdownChunks_DoesNotSplitTableHeaderFromSeparator(t *testing.T) 
 	for i, chunk := range chunks {
 		if strings.Contains(chunk, "| --- | --- |") && !strings.Contains(chunk, "| name | score |") {
 			t.Fatalf("chunk %d split table header from separator: %q", i, chunk)
+		}
+	}
+}
+
+func TestSplitMarkdownChunks_KeepsSectionHeadingWithFollowingTableBlock(t *testing.T) {
+	intro := strings.Repeat("Intro paragraph content to consume chunk budget. ", 12)
+	input := strings.Join([]string{
+		intro,
+		"",
+		"## Table Alignment Test",
+		"",
+		"| Left align | Center align | Right align |",
+		"|:---|:---:|---:|",
+		"| apple | red | 10 |",
+		"| banana | yellow | 200 |",
+		"| cherry | dark red | 3000 |",
+		"",
+		"tail",
+	}, "\n")
+
+	chunks := splitMarkdownChunks(input, 680)
+	if len(chunks) < 2 {
+		t.Fatalf("expected split into multiple chunks, got %d", len(chunks))
+	}
+	for i, chunk := range chunks {
+		hasTable := strings.Contains(chunk, "| Left align | Center align | Right align |") ||
+			strings.Contains(chunk, "|:---|:---:|---:|")
+		if !hasTable {
+			continue
+		}
+		if !strings.Contains(chunk, "## Table Alignment Test") {
+			t.Fatalf("expected table chunk %d to include its section heading, got %q", i, chunk)
 		}
 	}
 }

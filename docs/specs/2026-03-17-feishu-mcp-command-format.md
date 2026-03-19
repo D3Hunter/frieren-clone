@@ -253,7 +253,10 @@ Implemented in `pkg/sender/text_sender.go` and service heartbeat flow.
   - codex markdown mode uses a lower safety cap (currently 1380 runes before prefixing) to reduce Feishu interactive markdown send failures on larger chunks,
   - plain mode keeps rune/line-aware chunking,
   - Codex markdown mode uses markdown-aware block chunking to avoid splitting fenced code/table/list blocks when possible,
-  - each chunk keeps ordering prefix (`[i/n]`).
+  - Codex markdown mode keeps section headings attached to their following content block (for example table/list/code) when possible to improve per-chunk rendering stability,
+  - each chunk keeps ordering marker (`[i/n]`):
+    - plain text mode prefixes each chunk (`[i/n] ...`),
+    - codex markdown mode appends the marker as a suffix so leading markdown structures (for example headings) still render correctly.
 - Card send fallback:
   - if sending one Codex markdown chunk as interactive card fails, sender retries that chunk once as plain `text`.
 - Processing feedback:

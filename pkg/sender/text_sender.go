@@ -291,7 +291,9 @@ func normalizeRenderMode(mode string) string {
 
 func withChunkPrefix(chunk string, index, total int, renderMode string) string {
 	if normalizeRenderMode(renderMode) == renderModeCodexMarkdown {
-		return fmt.Sprintf("[%d/%d]\n\n%s", index+1, total, chunk)
+		// Feishu markdown headings can be degraded when a plain-text ordering label precedes the block.
+		// Keep markdown syntax at the top of each chunk and append the ordering marker as a suffix.
+		return fmt.Sprintf("%s\n\n[%d/%d]", strings.TrimRight(chunk, "\n"), index+1, total)
 	}
 	return fmt.Sprintf("[%d/%d] %s", index+1, total, chunk)
 }
@@ -351,14 +353,30 @@ func splitMarkdownChunks(input string, maxRunes int) []string {
 	}
 
 	chunks := make([]string, 0, len(blocks))
-	current := strings.Builder{}
+	currentBlocks := make([]string, 0, 8)
+	currentRunes := 0
+	flushCurrent := func() {
+		if len(currentBlocks) == 0 {
+			return
+		}
+		chunks = append(chunks, strings.Join(currentBlocks, ""))
+		currentBlocks = currentBlocks[:0]
+		currentRunes = 0
+	}
+	appendBlock := func(block string) {
+		currentBlocks = append(currentBlocks, block)
+		currentRunes += utf8.RuneCountInString(block)
+	}
+
 	for _, block := range blocks {
 		if block == "" {
 			continue
 		}
-		if current.Len() == 0 {
-			if utf8.RuneCountInString(block) <= maxRunes {
-				current.WriteString(block)
+		blockRunes := utf8.RuneCountInString(block)
+
+		if len(currentBlocks) == 0 {
+			if blockRunes <= maxRunes {
+				appendBlock(block)
 				continue
 			}
 			forced := splitChunks(block, maxRunes)
@@ -366,29 +384,94 @@ func splitMarkdownChunks(input string, maxRunes int) []string {
 			continue
 		}
 
-		combined := current.String() + block
-		if utf8.RuneCountInString(combined) <= maxRunes {
-			current.WriteString(block)
+		if currentRunes+blockRunes <= maxRunes {
+			appendBlock(block)
 			continue
 		}
 
-		chunks = append(chunks, current.String())
-		current.Reset()
-		if utf8.RuneCountInString(block) <= maxRunes {
-			current.WriteString(block)
+		if headingTail, ok := headingCarryTailBlocks(currentBlocks, block); ok {
+			// Keep heading lines attached to their following block. Without this carry-over, a table/list/code
+			// block can start a new chunk with no section title, and some Feishu markdown cards render poorly.
+			tailRunes := runeCountOfBlocks(headingTail)
+			currentBlocks = currentBlocks[:len(currentBlocks)-len(headingTail)]
+			currentRunes -= tailRunes
+			flushCurrent()
+
+			currentBlocks = append(currentBlocks, headingTail...)
+			currentRunes = tailRunes
+			if currentRunes+blockRunes <= maxRunes {
+				appendBlock(block)
+				continue
+			}
+
+			flushCurrent()
+			if blockRunes <= maxRunes {
+				appendBlock(block)
+				continue
+			}
+			forced := splitChunks(block, maxRunes)
+			chunks = append(chunks, forced...)
+			continue
+		}
+
+		flushCurrent()
+		if blockRunes <= maxRunes {
+			appendBlock(block)
 			continue
 		}
 		forced := splitChunks(block, maxRunes)
 		chunks = append(chunks, forced...)
 	}
 
-	if current.Len() > 0 {
-		chunks = append(chunks, current.String())
-	}
+	flushCurrent()
 	if len(chunks) == 0 {
 		return []string{input}
 	}
 	return chunks
+}
+
+func headingCarryTailBlocks(currentBlocks []string, nextBlock string) ([]string, bool) {
+	if len(currentBlocks) == 0 {
+		return nil, false
+	}
+	if strings.TrimSpace(nextBlock) == "" {
+		return nil, false
+	}
+	lastContent := len(currentBlocks) - 1
+	for lastContent >= 0 && strings.TrimSpace(currentBlocks[lastContent]) == "" {
+		lastContent--
+	}
+	if lastContent < 0 || !isHeadingBlock(currentBlocks[lastContent]) {
+		return nil, false
+	}
+	return append([]string(nil), currentBlocks[lastContent:]...), true
+}
+
+func isHeadingBlock(block string) bool {
+	trimmed := strings.TrimSpace(block)
+	if trimmed == "" || strings.Contains(trimmed, "\n") {
+		return false
+	}
+
+	hashCount := 0
+	for hashCount < len(trimmed) && trimmed[hashCount] == '#' {
+		hashCount++
+	}
+	if hashCount == 0 || hashCount > 6 {
+		return false
+	}
+	if len(trimmed) == hashCount {
+		return false
+	}
+	return trimmed[hashCount] == ' '
+}
+
+func runeCountOfBlocks(blocks []string) int {
+	total := 0
+	for _, block := range blocks {
+		total += utf8.RuneCountInString(block)
+	}
+	return total
 }
 
 func splitMarkdownBlocks(input string) []string {

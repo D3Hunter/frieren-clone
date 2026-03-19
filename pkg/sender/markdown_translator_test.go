@@ -262,3 +262,45 @@ func TestTranslateCodexMarkdownToFeishu_UnwrapsQuadrupleFenceAndPreservesTopHead
 		t.Fatalf("expected thread info section preserved, got %q", output)
 	}
 }
+
+func TestTranslateCodexMarkdownToFeishu_TableRowsDoNotContainDanglingBackticks(t *testing.T) {
+	input := strings.Join([]string{
+		"| Feature | Syntax Example | Supported in GFM | Notes |",
+		"| --- | --- | --- | --- |",
+		"| Table | `| a | b |` | Yes | GitHub flavored |",
+	}, "\n")
+
+	output, err := translateCodexMarkdownToFeishu(input)
+	if err != nil {
+		t.Fatalf("translateCodexMarkdownToFeishu error: %v", err)
+	}
+
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		if !strings.HasPrefix(strings.TrimSpace(line), "|") {
+			continue
+		}
+		if countUnescapedBackticks(line)%2 != 0 {
+			t.Fatalf("expected table row to avoid dangling backticks, got %q", line)
+		}
+	}
+}
+
+func countUnescapedBackticks(value string) int {
+	count := 0
+	escaped := false
+	for _, r := range value {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if r == '\\' {
+			escaped = true
+			continue
+		}
+		if r == '`' {
+			count++
+		}
+	}
+	return count
+}

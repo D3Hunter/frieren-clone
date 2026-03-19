@@ -305,9 +305,19 @@ func renderTableCells(row gast.Node, source []byte) []string {
 		cellText := strings.TrimSpace(renderNodeInlineText(cellNode, source))
 		cellText = strings.ReplaceAll(cellText, "\n", " ")
 		cellText = strings.ReplaceAll(cellText, "|", `\|`)
+		cellText = sanitizeTableCellBackticks(cellText)
 		cells = append(cells, cellText)
 	}
 	return cells
+}
+
+func sanitizeTableCellBackticks(cellText string) string {
+	if strings.Count(cellText, "`")%2 == 0 {
+		return cellText
+	}
+	// Some model outputs place unescaped pipes inside table cell code spans (for example `| a | b |`),
+	// which can be parsed into dangling single backticks. Escape those backticks to keep Feishu markdown renderable.
+	return strings.ReplaceAll(cellText, "`", "\\`")
 }
 
 func padCells(cells []string, size int) []string {
