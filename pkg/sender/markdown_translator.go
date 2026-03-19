@@ -14,7 +14,7 @@ import (
 )
 
 func translateCodexMarkdownToFeishu(input string) (string, error) {
-	normalized := normalizeMarkdown(input)
+	normalized := unwrapTopLevelMarkdownFence(normalizeMarkdown(input))
 	if strings.TrimSpace(normalized) == "" {
 		return normalized, nil
 	}
@@ -28,6 +28,84 @@ func translateCodexMarkdownToFeishu(input string) (string, error) {
 		return normalizeMarkdown(input), nil
 	}
 	return output, nil
+}
+
+func unwrapTopLevelMarkdownFence(input string) string {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return input
+	}
+
+	lines := strings.Split(trimmed, "\n")
+	if len(lines) < 3 {
+		return input
+	}
+
+	firstLine := strings.TrimSpace(lines[0])
+	fenceChar, fenceLen, ok := parseFenceMarker(firstLine)
+	if !ok {
+		return input
+	}
+	fenceInfo := strings.TrimSpace(firstLine[fenceLen:])
+	if !isMarkdownFenceInfo(fenceInfo) {
+		return input
+	}
+
+	closingIndex := -1
+	for i := len(lines) - 1; i >= 1; i-- {
+		if isStrictFenceCloser(strings.TrimSpace(lines[i]), fenceChar, fenceLen) {
+			closingIndex = i
+			break
+		}
+	}
+	if closingIndex <= 0 {
+		return input
+	}
+
+	body := strings.TrimSpace(strings.Join(lines[1:closingIndex], "\n"))
+	suffix := strings.TrimSpace(strings.Join(lines[closingIndex+1:], "\n"))
+	switch {
+	case body == "" && suffix == "":
+		return ""
+	case body == "":
+		return suffix
+	case suffix == "":
+		return body
+	default:
+		return body + "\n\n" + suffix
+	}
+}
+
+func isMarkdownFenceInfo(info string) bool {
+	fields := strings.Fields(strings.ToLower(strings.TrimSpace(info)))
+	if len(fields) == 0 {
+		return false
+	}
+	lang := strings.Trim(fields[0], "{}")
+	switch lang {
+	case "markdown", "md", "mdown", "mkdn", "mkd", "commonmark":
+		return true
+	default:
+		return false
+	}
+}
+
+func isStrictFenceCloser(line string, fenceChar rune, fenceLen int) bool {
+	if strings.TrimSpace(line) == "" {
+		return false
+	}
+	count := 0
+	for _, r := range line {
+		if r == fenceChar {
+			count++
+			continue
+		}
+		break
+	}
+	if count < fenceLen {
+		return false
+	}
+	return strings.TrimSpace(line[count:]) == ""
 }
 
 type markdownASTRenderer struct {
@@ -50,8 +128,10 @@ func (r markdownASTRenderer) renderBlock(node gast.Node, listDepth int) string {
 	switch typed := node.(type) {
 	case *gast.Heading:
 		level := typed.Level
-		if level < 1 {
-			level = 1
+		// Observed in Feishu card rendering: top-level h1 may disappear in some payloads.
+		// Downgrade h1 to h2 as a compatibility workaround so the title stays visible.
+		if level < 2 {
+			level = 2
 		}
 		if level > 6 {
 			level = 6

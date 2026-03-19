@@ -236,6 +236,7 @@ Implemented in `pkg/sender/text_sender.go` and service heartbeat flow.
   - parses Codex CommonMark/GFM output with Goldmark + GFM extensions,
   - renders normalized Feishu-friendly markdown from AST,
   - preserves core structures (headings, lists, quotes, fenced code, tables),
+  - downgrades level-1 headings (`#`) to level-2 (`##`) as a compatibility workaround based on observed Feishu card rendering where h1 may not appear,
   - converts non-http/non-https links (for example local file paths) into readable inline code/path text,
   - escapes raw HTML blocks/inline HTML by default,
   - degrades task list checkboxes to readable markdown markers.
@@ -243,11 +244,13 @@ Implemented in `pkg/sender/text_sender.go` and service heartbeat flow.
   - uses Feishu `interactive` message with card JSON schema `2.0`,
   - sends body element `{ "tag": "markdown", "content": "<translated markdown>" }`.
 - Codex footer formatting:
-  - appends thread metadata section at the bottom as plain text,
+  - appends a markdown metadata section at the bottom (`### Thread info`),
+  - renders metadata lines as markdown bullets for readability,
   - includes `codex_thread_id`,
   - includes `context_window` token usage line when `codex-status` succeeds and usage can be parsed.
 - Long output splitting:
-  - chunk at 1800 runes,
+  - plain text mode chunks at 1800 runes,
+  - codex markdown mode uses a lower safety cap (currently 1380 runes before prefixing) to reduce Feishu interactive markdown send failures on larger chunks,
   - plain mode keeps rune/line-aware chunking,
   - Codex markdown mode uses markdown-aware block chunking to avoid splitting fenced code/table/list blocks when possible,
   - each chunk keeps ordering prefix (`[i/n]`).

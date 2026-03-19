@@ -740,13 +740,13 @@ func formatCodexOutput(output, codexThreadID, tokenUsage string, notices ...stri
 	codexThreadID = strings.TrimSpace(codexThreadID)
 	footer := make([]string, 0, 2)
 	if tokenUsage != "" {
-		footer = append(footer, fmt.Sprintf("context_window: %s", tokenUsage))
+		footer = append(footer, fmt.Sprintf("- context_window: %s", tokenUsage))
 	}
 	if codexThreadID != "" {
-		footer = append(footer, fmt.Sprintf("codex_thread_id: %s", codexThreadID))
+		footer = append(footer, fmt.Sprintf("- codex_thread_id: `%s`", codexThreadID))
 	}
 	if len(footer) > 0 {
-		body = appendTextNotice(body, "Thread info:\n"+strings.Join(footer, "\n"))
+		body = appendTextNotice(body, "### Thread info\n"+strings.Join(footer, "\n"))
 	}
 	return normalizeOutput(body)
 }

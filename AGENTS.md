@@ -30,6 +30,10 @@ This repository rule overrides any default plan/spec output location suggested b
 - Comments should explain what the target does and, when useful, how it does it.
 - Keep comment length proportional to complexity: simple wrappers can use one sentence; workflow-heavy logic should use richer context.
 
+# Special Handling Branches
+
+- When adding special-case handling branches (for example compatibility fallbacks, provider quirks, or non-obvious guard paths), add an in-code comment that explains why the branch exists.
+
 # PR Workflow
 
 - Do not use a `[codex]` prefix in PR titles.

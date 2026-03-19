@@ -59,10 +59,10 @@ func TestFormatCodexOutput_RemovesStructuredPayloadAndKeepsMarkdown(t *testing.T
 	if !strings.Contains(got, "[`pkg/dxf/framework/doc.go:17`](/Users/jujiajia/code/pingcap/tidb/pkg/dxf/framework/doc.go:17)") {
 		t.Fatalf("expected markdown link preserved, got %q", got)
 	}
-	if !strings.Contains(got, "Thread info:") {
+	if !strings.Contains(got, "### Thread info") {
 		t.Fatalf("expected thread info section, got %q", got)
 	}
-	if !strings.HasSuffix(strings.TrimSpace(got), "codex_thread_id: codex_t1") {
+	if !strings.HasSuffix(strings.TrimSpace(got), "- codex_thread_id: `codex_t1`") {
 		t.Fatalf("expected thread id at bottom of output, got %q", got)
 	}
 }
@@ -70,10 +70,13 @@ func TestFormatCodexOutput_RemovesStructuredPayloadAndKeepsMarkdown(t *testing.T
 func TestFormatCodexOutput_AppendsContextWindowUsageToFooter(t *testing.T) {
 	got := formatCodexOutput("done", "codex_t1", "123K / 272K tokens used (55% left)")
 
-	if !strings.Contains(got, "context_window: 123K / 272K tokens used (55% left)") {
+	if !strings.Contains(got, "### Thread info") {
+		t.Fatalf("expected markdown footer heading, got %q", got)
+	}
+	if !strings.Contains(got, "- context_window: 123K / 272K tokens used (55% left)") {
 		t.Fatalf("expected context window footer, got %q", got)
 	}
-	if !strings.HasSuffix(strings.TrimSpace(got), "codex_thread_id: codex_t1") {
+	if !strings.HasSuffix(strings.TrimSpace(got), "- codex_thread_id: `codex_t1`") {
 		t.Fatalf("expected thread id to remain in footer, got %q", got)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
@@ -168,6 +169,220 @@ func TestBuildContent_InteractivePreservesMarkdownListMarkers(t *testing.T) {
 	}
 	if !strings.Contains(content, "**bold**") {
 		t.Fatalf("expected markdown emphasis preserved, got %s", content)
+	}
+}
+
+func TestSend_CodexMarkdownModeUnwrapsQuadrupleMarkdownFence(t *testing.T) {
+	api := &fakeMessageAPI{}
+	s := NewTextSender(api, &fakeReactionAPI{})
+
+	input := strings.Join([]string{
+		"````markdown",
+		"# Markdown Playground 2",
+		"",
+		"## Text Styles",
+		"Use **bold** and `inline code`.",
+		"",
+		"```json",
+		"{",
+		`  "ok": true`,
+		"}",
+		"```",
+		"````",
+		"",
+		"### Thread info",
+		"- codex_thread_id: `tid_123`",
+	}, "\n")
+
+	_, err := s.Send(context.Background(), SendRequest{
+		ChatID:           "oc_x",
+		ReplyToMessageID: "om_msg",
+		Text:             input,
+		RenderMode:       string(renderModeCodexMarkdown),
+	})
+	if err != nil {
+		t.Fatalf("Send error: %v", err)
+	}
+	if len(api.replyReqs) != 1 {
+		t.Fatalf("expected one reply request, got %d", len(api.replyReqs))
+	}
+	if api.replyReqs[0].Body == nil || api.replyReqs[0].Body.Content == nil {
+		t.Fatal("expected interactive card content")
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(*api.replyReqs[0].Body.Content), &payload); err != nil {
+		t.Fatalf("expected valid interactive payload: %v", err)
+	}
+	body, ok := payload["body"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected body object, got %#v", payload["body"])
+	}
+	elements, ok := body["elements"].([]any)
+	if !ok || len(elements) == 0 {
+		t.Fatalf("expected non-empty body elements, got %#v", body["elements"])
+	}
+	first, ok := elements[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected first element object, got %#v", elements[0])
+	}
+	md, ok := first["content"].(string)
+	if !ok {
+		t.Fatalf("expected markdown string content, got %#v", first["content"])
+	}
+	if strings.Contains(md, "````markdown") {
+		t.Fatalf("expected outer quadruple markdown fence removed, got %q", md)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(md), "## Markdown Playground 2") {
+		t.Fatalf("expected heading at top of translated markdown, got %q", md)
+	}
+}
+
+func TestSend_CodexMarkdownModeKeepsPlaygroundHeadingForComplexPayload(t *testing.T) {
+	api := &fakeMessageAPI{}
+	s := NewTextSender(api, &fakeReactionAPI{})
+
+	input := strings.Join([]string{
+		"````markdown",
+		"# Markdown Playground 2",
+		"",
+		"## Text Styles",
+		"This has **bold**, *italic*, ***bold+italic***, ~~strikethrough~~, and `inline code`.",
+		"",
+		"---",
+		"",
+		"## Links",
+		"- Inline link: [TiDB repo](https://github.com/pingcap/tidb)",
+		"- Auto-link: <https://example.com>",
+		"- Footnote reference[^demo]",
+		"",
+		"## Task List",
+		"- [x] Sample created",
+		"- [ ] Add more cases",
+		"",
+		"## Collapsible Section",
+		"<details>",
+		"<summary>Expand me</summary>",
+		"",
+		"Inside the fold you can include text, lists, and code.",
+		"",
+		"```json",
+		"{",
+		`  "kind": "markdown-demo",`,
+		`  "ok": true`,
+		"}",
+		"```",
+		"</details>",
+		"",
+		"## Table",
+		"| Item | Align Left | Align Center | Align Right |",
+		"|:-----|:-----------|:------------:|------------:|",
+		"| A    | yes        | yes          | yes         |",
+		"| B    | demo       | demo         | 123         |",
+		"",
+		"## Image",
+		"![Placeholder image](https://picsum.photos/360/120)",
+		"",
+		"[^demo]: Footnotes are supported in many Markdown renderers.",
+		"````",
+		"",
+		"### Thread info",
+		"- context_window: 17K / 258K tokens used (93% left)",
+		"- codex_thread_id: `tid_123`",
+	}, "\n")
+
+	_, err := s.Send(context.Background(), SendRequest{
+		ChatID:           "oc_x",
+		ReplyToMessageID: "om_msg",
+		Text:             input,
+		RenderMode:       string(renderModeCodexMarkdown),
+	})
+	if err != nil {
+		t.Fatalf("Send error: %v", err)
+	}
+	if len(api.replyReqs) != 1 {
+		t.Fatalf("expected one reply request, got %d", len(api.replyReqs))
+	}
+	if api.replyReqs[0].Body == nil || api.replyReqs[0].Body.Content == nil {
+		t.Fatal("expected interactive card content")
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(*api.replyReqs[0].Body.Content), &payload); err != nil {
+		t.Fatalf("expected valid interactive payload: %v", err)
+	}
+	body, ok := payload["body"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected body object, got %#v", payload["body"])
+	}
+	elements, ok := body["elements"].([]any)
+	if !ok || len(elements) == 0 {
+		t.Fatalf("expected non-empty body elements, got %#v", body["elements"])
+	}
+	first, ok := elements[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected first element object, got %#v", elements[0])
+	}
+	md, ok := first["content"].(string)
+	if !ok {
+		t.Fatalf("expected markdown string content, got %#v", first["content"])
+	}
+	if strings.Contains(md, "````markdown") {
+		t.Fatalf("expected outer quadruple markdown fence removed, got %q", md)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(md), "## Markdown Playground 2") {
+		t.Fatalf("expected heading at top of translated markdown, got %q", md)
+	}
+}
+
+func TestSend_CodexMarkdownModeUsesSafeChunkSizeForInteractiveCards(t *testing.T) {
+	const safeMarkdownChunkLimit = 1400
+
+	api := &fakeMessageAPI{}
+	s := NewTextSender(api, &fakeReactionAPI{})
+
+	input := "## Markdown Playground (2K+ Characters)\n\n" +
+		strings.Repeat("Markdown rendering should remain readable even with long-form text. ", 90)
+
+	_, err := s.Send(context.Background(), SendRequest{
+		ChatID:           "oc_x",
+		ReplyToMessageID: "om_msg",
+		Text:             input,
+		RenderMode:       string(renderModeCodexMarkdown),
+	})
+	if err != nil {
+		t.Fatalf("Send error: %v", err)
+	}
+	if len(api.replyReqs) < 2 {
+		t.Fatalf("expected long markdown to split into multiple chunks, got %d", len(api.replyReqs))
+	}
+
+	for i, req := range api.replyReqs {
+		if req.Body == nil || req.Body.MsgType == nil || *req.Body.MsgType != "interactive" {
+			t.Fatalf("chunk %d expected interactive message, got %+v", i, req.Body)
+		}
+		if req.Body.Content == nil {
+			t.Fatalf("chunk %d expected interactive content", i)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(*req.Body.Content), &payload); err != nil {
+			t.Fatalf("chunk %d invalid interactive payload: %v", i, err)
+		}
+		body, ok := payload["body"].(map[string]any)
+		if !ok {
+			t.Fatalf("chunk %d expected body object, got %#v", i, payload["body"])
+		}
+		elements, ok := body["elements"].([]any)
+		if !ok || len(elements) == 0 {
+			t.Fatalf("chunk %d expected non-empty body elements, got %#v", i, body["elements"])
+		}
+		md, ok := elements[0].(map[string]any)["content"].(string)
+		if !ok {
+			t.Fatalf("chunk %d expected markdown content string", i)
+		}
+		if got := utf8.RuneCountInString(md); got > safeMarkdownChunkLimit {
+			t.Fatalf("chunk %d markdown content too large for safe interactive size: %d > %d", i, got, safeMarkdownChunkLimit)
+		}
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 )
 
 const defaultMaxChunkRunes = 1800
+const defaultMaxMarkdownChunkRunes = 1380
 
 const (
 	renderModePlainText     = "plain_text"
@@ -96,7 +97,13 @@ func (s *TextSender) Send(ctx context.Context, req SendRequest) (SendReceipt, er
 
 	chunks := splitChunks(text, s.maxChunkRunes)
 	if renderMode == renderModeCodexMarkdown {
-		chunks = splitMarkdownChunks(text, s.maxChunkRunes)
+		markdownChunkRunes := s.maxChunkRunes
+		// Feishu interactive markdown can fail on larger chunk payloads even when plain text would pass.
+		// Use a safer markdown-specific cap to avoid fallback-to-plain and preserve rendering consistency.
+		if markdownChunkRunes > defaultMaxMarkdownChunkRunes {
+			markdownChunkRunes = defaultMaxMarkdownChunkRunes
+		}
+		chunks = splitMarkdownChunks(text, markdownChunkRunes)
 	}
 	if len(chunks) > 1 {
 		for i, chunk := range chunks {
