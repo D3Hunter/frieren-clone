@@ -32,7 +32,7 @@ Behavior notes:
 - Plain-text follow-up messages in the same topic always continue the latest bound Codex thread.
 - `/help` includes a one-line reminder of this `/mcp call codex` new-thread behavior.
 - Unknown commands fall back to concise help.
-- Unknown project alias returns `未知项目别名：<alias>`.
+- Unknown project alias returns `Unknown project alias: <alias>`.
 
 ## 3) Trigger and routing rules
 
@@ -235,7 +235,7 @@ Implemented in `pkg/sender/text_sender.go` and service heartbeat flow.
   - each chunk prefixed with `[i/n]`.
 - Processing feedback:
   - add immediate `OnIt` reaction on incoming user message,
-  - send `仍在处理中（已运行 X分YY秒），请稍候…` every configured heartbeat interval (default 180 seconds) until completion.
+  - send `Still processing (elapsed XmYYs), please wait...` every configured heartbeat interval (default 180 seconds) until completion.
 
 ## 10) Verification and test coverage
 

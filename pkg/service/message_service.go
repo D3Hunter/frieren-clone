@@ -115,7 +115,7 @@ type CommandService struct {
 }
 
 var mentionTagPattern = regexp.MustCompile(`(?s)<at\b[^>]*>.*?</at>`)
-var projectCommandPattern = regexp.MustCompile(`^/([a-zA-Z0-9_-]+)\s+(.+)$`)
+var projectCommandPattern = regexp.MustCompile(`(?s)^/([a-zA-Z0-9_-]+)\s+(.+)$`)
 var codexThreadIDPattern = regexp.MustCompile(`(?i)"thread(?:_|)id"\s*:\s*"([^"]+)"`)
 var tokenUsagePattern = regexp.MustCompile(`(?i)([0-9][0-9,._]*)\s*/\s*([0-9][0-9,._]*)\s*(?:tokens?)`)
 
@@ -125,17 +125,17 @@ const (
 	codexReplyToolName          = "codex-reply"
 	codexStatusToolName         = "codex-status"
 	mcpCodexTopicAlias          = "__mcp_codex__"
-	defaultHelpMessage          = "可用命令：\n/help\n/mcp tools\n/mcp schema <tool>\n/mcp call <tool> <json>\n/<project> <prompt>\n\n提示：/mcp call codex 每次都会新建 Codex 线程。"
-	codexPromptHelpMessage      = `用法：/mcp call codex {"prompt":"<你的问题>"}`
+	defaultHelpMessage          = "Available commands:\n/help\n/mcp tools\n/mcp schema <tool>\n/mcp call <tool> <json>\n/<project> <prompt>\n\nNote: /mcp call codex always starts a new Codex thread."
+	codexPromptHelpMessage      = `Usage: /mcp call codex {"prompt":"<your prompt>"}`
 	defaultCodexModel           = "gpt-5.3-codex"
 	defaultCodexReasoningEffort = "xhigh"
 	defaultCodexSandbox         = "danger-full-access"
 	defaultCodexApprovalPolicy  = "never"
 	// Intentionally keep /mcp call codex as "start new thread" so users can open
 	// multiple independent Codex threads inside one Feishu topic when needed.
-	codexNewThreadNotice     = "提示：按设计，/mcp call codex 每次都会新建 Codex 线程，不会复用当前话题绑定。"
-	groupMentionHelpMessage  = "群聊里请先 @机器人 再发送斜杠命令，例如：@机器人 /help"
-	unknownProjectHelpPrefix = "未知项目别名"
+	codexNewThreadNotice     = "Note: by design, /mcp call codex always starts a new Codex thread and does not reuse the current topic binding."
+	groupMentionHelpMessage  = "In group chats, mention the bot before slash commands, for example: @bot /help"
+	unknownProjectHelpPrefix = "Unknown project alias"
 	codexSessionTimeout      = time.Hour
 )
 
@@ -189,7 +189,7 @@ func (s *CommandService) HandleIncomingMessage(ctx context.Context, msg Incoming
 	msgLogger.Info("incoming feishu message", zap.String("raw_text", text))
 	if text == "" {
 		msgLogger.Info("incoming message has empty text")
-		_, err := s.send(ctx, msg, "请输入命令，使用 /help 查看帮助。")
+		_, err := s.send(ctx, msg, "Please enter a command. Use /help for usage.")
 		return err
 	}
 	cleanText := stripMentions(text)
@@ -224,7 +224,7 @@ func (s *CommandService) HandleIncomingMessage(ctx context.Context, msg Incoming
 	}
 
 	msgLogger.Info("plain text without topic binding; returning help")
-	_, err := s.send(ctx, msg, "请使用 /help 查看命令格式。")
+	_, err := s.send(ctx, msg, "Use /help to see command syntax.")
 	return err
 }
 
@@ -259,19 +259,19 @@ func (s *CommandService) handleSlashCommand(ctx context.Context, msg IncomingMes
 	case strings.HasPrefix(cleanText, "/mcp schema "):
 		tool := strings.TrimSpace(strings.TrimPrefix(cleanText, "/mcp schema "))
 		if tool == "" {
-			_, err := s.send(ctx, msg, "用法：/mcp schema <tool>")
+			_, err := s.send(ctx, msg, "Usage: /mcp schema <tool>")
 			return err
 		}
 		return s.handleMCPSchema(ctx, msg, tool)
 	case strings.HasPrefix(cleanText, "/mcp call "):
 		tool, argsRaw, ok := parseMCPCallCommand(cleanText)
 		if !ok {
-			_, err := s.send(ctx, msg, "用法：/mcp call <tool> <json>")
+			_, err := s.send(ctx, msg, "Usage: /mcp call <tool> <json>")
 			return err
 		}
 		var args map[string]any
 		if err := json.Unmarshal([]byte(argsRaw), &args); err != nil {
-			_, sendErr := s.send(ctx, msg, attachDiagnosticID(fmt.Sprintf("JSON 解析失败：%v", err), msg))
+			_, sendErr := s.send(ctx, msg, attachDiagnosticID(fmt.Sprintf("JSON parse failed: %v", err), msg))
 			if sendErr != nil {
 				return sendErr
 			}
@@ -298,7 +298,7 @@ func (s *CommandService) handleSlashCommand(ctx context.Context, msg IncomingMes
 		)
 		cwd, ok := s.cfg.ProjectAliasCWD[alias]
 		if !ok || strings.TrimSpace(cwd) == "" {
-			_, err := s.send(ctx, msg, fmt.Sprintf("%s：%s", unknownProjectHelpPrefix, alias))
+			_, err := s.send(ctx, msg, fmt.Sprintf("%s: %s", unknownProjectHelpPrefix, alias))
 			return err
 		}
 		outcome, err := s.executeWithHeartbeat(ctx, msg, func(runCtx context.Context) (commandOutcome, error) {
@@ -319,7 +319,7 @@ func (s *CommandService) handleSlashCommand(ctx context.Context, msg IncomingMes
 			}, nil
 		})
 		if err != nil {
-			return s.replyCommandFailure(ctx, msg, "执行失败", err)
+			return s.replyCommandFailure(ctx, msg, "Execution failed", err)
 		}
 		finalReceipt, err := s.send(ctx, msg, formatCodexOutput(outcome.text, outcome.codexThreadID, outcome.tokenUsage))
 		if err != nil {
@@ -356,22 +356,22 @@ func (s *CommandService) handleMCPTools(ctx context.Context, msg IncomingMessage
 			return commandOutcome{}, runErr
 		}
 		if len(tools) == 0 {
-			return commandOutcome{text: "当前没有可用 MCP 工具。"}, nil
+			return commandOutcome{text: "No MCP tools are currently available."}, nil
 		}
 		sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
 		lines := make([]string, 0, len(tools)+1)
-		lines = append(lines, "可用 MCP 工具：")
+		lines = append(lines, "Available MCP tools:")
 		for _, tool := range tools {
 			line := "- " + tool.Name
 			if strings.TrimSpace(tool.Description) != "" {
-				line += "：" + tool.Description
+				line += ": " + tool.Description
 			}
 			lines = append(lines, line)
 		}
 		return commandOutcome{text: strings.Join(lines, "\n")}, nil
 	})
 	if err != nil {
-		return s.replyCommandFailure(ctx, msg, "获取工具失败", err)
+		return s.replyCommandFailure(ctx, msg, "Failed to list tools", err)
 	}
 	_, err = s.send(ctx, msg, normalizeOutput(outcome.text))
 	return err
@@ -383,10 +383,10 @@ func (s *CommandService) handleMCPSchema(ctx context.Context, msg IncomingMessag
 		if runErr != nil {
 			return commandOutcome{}, runErr
 		}
-		return commandOutcome{text: fmt.Sprintf("%s 的参数 schema：\n%s", tool, schema)}, nil
+		return commandOutcome{text: fmt.Sprintf("Schema for %s:\n%s", tool, schema)}, nil
 	})
 	if err != nil {
-		return s.replyCommandFailure(ctx, msg, "获取 schema 失败", err)
+		return s.replyCommandFailure(ctx, msg, "Failed to get schema", err)
 	}
 	_, err = s.send(ctx, msg, normalizeOutput(outcome.text))
 	return err
@@ -416,7 +416,7 @@ func (s *CommandService) handleMCPCall(ctx context.Context, msg IncomingMessage,
 		}, nil
 	})
 	if err != nil {
-		return s.replyCommandFailure(ctx, msg, "调用工具失败", err)
+		return s.replyCommandFailure(ctx, msg, "Failed to call tool", err)
 	}
 	responseText := normalizeOutput(outcome.text)
 	if strings.EqualFold(tool, codexToolName) {
@@ -436,7 +436,7 @@ func (s *CommandService) handleTopicFollowup(ctx context.Context, msg IncomingMe
 	msgLogger := s.messageLogger(msg)
 	threadID := strings.TrimSpace(binding.CodexThreadID)
 	if threadID == "" {
-		_, err := s.send(ctx, msg, "当前话题没有可继续的 Codex 线程，请先发送新的斜杠命令。")
+		_, err := s.send(ctx, msg, "No Codex thread is bound to this topic yet. Send a new slash command first.")
 		return err
 	}
 	outcome, err := s.executeWithHeartbeat(ctx, msg, func(runCtx context.Context) (commandOutcome, error) {
@@ -460,7 +460,7 @@ func (s *CommandService) handleTopicFollowup(ctx context.Context, msg IncomingMe
 	})
 	if err != nil {
 		if !isCodexReplySessionNotFoundError(err) {
-			return s.replyCommandFailure(ctx, msg, "执行失败", err)
+			return s.replyCommandFailure(ctx, msg, "Execution failed", err)
 		}
 
 		notice := s.formatSessionResetNotice(msg, binding)
@@ -482,7 +482,7 @@ func (s *CommandService) handleTopicFollowup(ctx context.Context, msg IncomingMe
 			return nextOutcome, nil
 		})
 		if err != nil {
-			return s.replyCommandFailure(ctx, msg, "执行失败", err)
+			return s.replyCommandFailure(ctx, msg, "Execution failed", err)
 		}
 	}
 	finalReceipt, err := s.send(ctx, msg, formatCodexOutput(outcome.text, outcome.codexThreadID, outcome.tokenUsage))
@@ -611,7 +611,7 @@ func formatProcessingHeartbeat(elapsed time.Duration) string {
 	if elapsed < 0 {
 		elapsed = 0
 	}
-	return fmt.Sprintf("仍在处理中（已运行 %s），请稍候…", formatElapsedDuration(elapsed))
+	return fmt.Sprintf("Still processing (elapsed %s), please wait...", formatElapsedDuration(elapsed))
 }
 
 func formatElapsedDuration(elapsed time.Duration) string {
@@ -623,9 +623,9 @@ func formatElapsedDuration(elapsed time.Duration) string {
 	minutes := (totalSeconds % 3600) / 60
 	seconds := totalSeconds % 60
 	if hours > 0 {
-		return fmt.Sprintf("%d小时%02d分%02d秒", hours, minutes, seconds)
+		return fmt.Sprintf("%dh%02dm%02ds", hours, minutes, seconds)
 	}
-	return fmt.Sprintf("%d分%02d秒", minutes, seconds)
+	return fmt.Sprintf("%dm%02ds", minutes, seconds)
 }
 
 func (s *CommandService) send(ctx context.Context, msg IncomingMessage, text string) (SendReceipt, error) {
@@ -649,10 +649,10 @@ func (s *CommandService) replyCommandFailure(ctx context.Context, msg IncomingMe
 	msgLogger := s.messageLogger(msg)
 	text := strings.TrimSpace(prefix)
 	if text == "" {
-		text = "执行失败"
+		text = "Execution failed"
 	}
 	if cause != nil {
-		text = fmt.Sprintf("%s：%v", text, cause)
+		text = fmt.Sprintf("%s: %v", text, cause)
 		msgLogger.Error("command execution failed", zap.String("failure_message", text), zap.Error(cause))
 	} else {
 		msgLogger.Error("command execution failed", zap.String("failure_message", text))
@@ -708,7 +708,7 @@ func parseMCPCallCommand(input string) (string, string, bool) {
 func normalizeOutput(output string) string {
 	output = strings.TrimSpace(output)
 	if output == "" {
-		return "执行完成。"
+		return "Completed."
 	}
 	return output
 }
@@ -737,7 +737,7 @@ func formatCodexOutput(output, codexThreadID, tokenUsage string, notices ...stri
 		footer = append(footer, fmt.Sprintf("codex_thread_id: %s", codexThreadID))
 	}
 	if len(footer) > 0 {
-		body = appendTextNotice(body, "线程信息：\n"+strings.Join(footer, "\n"))
+		body = appendTextNotice(body, "Thread info:\n"+strings.Join(footer, "\n"))
 	}
 	return normalizeOutput(body)
 }
@@ -1077,18 +1077,18 @@ func (s *CommandService) formatSessionResetNotice(msg IncomingMessage, binding T
 		cwd = strings.TrimSpace(resolvedCWD)
 	}
 	if cwd == "" {
-		cwd = "(未设置)"
+		cwd = "(not set)"
 	}
 	previousThreadID := strings.TrimSpace(binding.CodexThreadID)
 	if previousThreadID == "" {
-		previousThreadID = "(空)"
+		previousThreadID = "(empty)"
 	}
 	feishuTopicID := chooseThreadID(msg.ThreadID, binding.FeishuThreadID)
 	if feishuTopicID == "" {
-		feishuTopicID = "(空)"
+		feishuTopicID = "(empty)"
 	}
 	return fmt.Sprintf(
-		"检测到 Codex 会话已过期（超过 %s 已自动关闭）。从这条消息开始将开启新会话，不再复用上一条会话上下文。\n环境信息：\n- project_alias: %s\n- previous_codex_thread_id: %s\n- cwd: %s\n- feishu_topic_id: %s\n- chat_id: %s",
+		"Detected expired Codex session (automatically closed after %s). Starting a new session from this message and no longer reusing previous session context.\nEnvironment:\n- project_alias: %s\n- previous_codex_thread_id: %s\n- cwd: %s\n- feishu_topic_id: %s\n- chat_id: %s",
 		formatElapsedDuration(codexSessionTimeout),
 		projectAlias,
 		previousThreadID,
@@ -1322,5 +1322,5 @@ func attachDiagnosticID(text string, msg IncomingMessage) string {
 	if requestID == "" {
 		return text
 	}
-	return fmt.Sprintf("%s\n诊断ID：%s", text, requestID)
+	return fmt.Sprintf("%s\nDiagnostic ID: %s", text, requestID)
 }

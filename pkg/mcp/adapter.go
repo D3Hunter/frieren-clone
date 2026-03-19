@@ -249,7 +249,7 @@ func renderCallToolResult(result *sdk.CallToolResult) string {
 		}
 	}
 	if len(parts) == 0 {
-		return "调用成功（无输出）"
+		return "Call succeeded (no output)."
 	}
 	return strings.Join(parts, "\n")
 }

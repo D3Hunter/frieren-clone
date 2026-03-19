@@ -331,7 +331,7 @@ func TestHandleIncomingMessage_HelpCommandMentionsMCPCallCodexStartsNewThread(t 
 		t.Fatal("expected help response")
 	}
 	helpText := sender.messages[len(sender.messages)-1].Text
-	if !strings.Contains(helpText, "/mcp call codex") || !strings.Contains(helpText, "每次都会新建") {
+	if !strings.Contains(helpText, "/mcp call codex") || !strings.Contains(helpText, "always starts a new") {
 		t.Fatalf("expected /help to mention /mcp call codex starts new thread, got %q", helpText)
 	}
 }
@@ -448,7 +448,7 @@ func TestHandleIncomingMessage_GroupCommandRequiresMention(t *testing.T) {
 func TestHandleIncomingMessage_ProjectCommandBindsTopic(t *testing.T) {
 	topicStore := newFakeTopicStore()
 	sender := &fakeMessageSender{returnThread: "omt_new"}
-	mcp := &fakeMCPGateway{callText: "完成\n{\"threadId\":\"codex_t1\"}"}
+	mcp := &fakeMCPGateway{callText: "done\n{\"threadId\":\"codex_t1\"}"}
 	svc := NewCommandService(CommandServiceDeps{
 		MCP:        mcp,
 		Sender:     sender,
@@ -575,7 +575,7 @@ func TestHandleIncomingMessage_ProjectCommandFormatsCodexOutputForFeishuText(t *
 	if !strings.Contains(got, "`DXF`") || !strings.Contains(got, "**distributed task framework**") {
 		t.Fatalf("expected markdown syntax preserved for rich rendering sender, got %q", got)
 	}
-	if !strings.Contains(got, "线程信息：") {
+	if !strings.Contains(got, "Thread info:") {
 		t.Fatalf("expected thread info section, got %q", got)
 	}
 	if !strings.Contains(got, "context_window: 123K / 272K tokens used (55% left)") {
@@ -709,7 +709,7 @@ func TestHandleIncomingMessage_TopicFollowupSessionTimeoutNotifiesAndStartsNewTh
 	if len(sender.messages) != 2 {
 		t.Fatalf("expected session-reset notice and final response, got %d messages", len(sender.messages))
 	}
-	if !strings.Contains(sender.messages[0].Text, "会话已过期") {
+	if !strings.Contains(sender.messages[0].Text, "expired Codex session") {
 		t.Fatalf("expected first message to mention session expiration, got %q", sender.messages[0].Text)
 	}
 	if !strings.Contains(sender.messages[0].Text, "codex_old") {
@@ -752,7 +752,7 @@ func TestHandleIncomingMessage_MCPCallInvalidJSON(t *testing.T) {
 	if !strings.Contains(sender.messages[len(sender.messages)-1].Text, "JSON") {
 		t.Fatalf("expected json error message, got %q", sender.messages[len(sender.messages)-1].Text)
 	}
-	if !strings.Contains(sender.messages[len(sender.messages)-1].Text, "诊断ID") {
+	if !strings.Contains(sender.messages[len(sender.messages)-1].Text, "Diagnostic ID") {
 		t.Fatalf("expected diagnostic id in json error message, got %q", sender.messages[len(sender.messages)-1].Text)
 	}
 }
@@ -788,10 +788,10 @@ func TestHandleIncomingMessage_MCPCallToolErrorIsHandledWithoutPropagation(t *te
 	if sender.reactions[0].EmojiType != "OnIt" {
 		t.Fatalf("expected OnIt reaction, got %q", sender.reactions[0].EmojiType)
 	}
-	if !strings.Contains(sender.messages[0].Text, "调用工具失败") {
+	if !strings.Contains(sender.messages[0].Text, "Failed to call tool") {
 		t.Fatalf("expected tool failure message, got %q", sender.messages[0].Text)
 	}
-	if !strings.Contains(sender.messages[0].Text, "诊断ID") {
+	if !strings.Contains(sender.messages[0].Text, "Diagnostic ID") {
 		t.Fatalf("expected diagnostic id in failure message, got %q", sender.messages[0].Text)
 	}
 }
@@ -857,7 +857,7 @@ func TestHandleIncomingMessage_MCPCallCodexExplainsNewThreadBehavior(t *testing.
 	if !strings.Contains(sender.messages[0].Text, "/mcp call codex") {
 		t.Fatalf("expected response to explain new-thread behavior, got %q", sender.messages[0].Text)
 	}
-	if !strings.Contains(sender.messages[0].Text, "每次都会新建") {
+	if !strings.Contains(sender.messages[0].Text, "always starts a new") {
 		t.Fatalf("expected response to mention new thread behavior, got %q", sender.messages[0].Text)
 	}
 }
@@ -1100,9 +1100,9 @@ func TestHandleIncomingMessage_HeartbeatWhileProcessing(t *testing.T) {
 	}
 	foundHeartbeat := false
 	for _, msg := range sender.messages {
-		if strings.Contains(msg.Text, "处理中") {
+		if strings.Contains(msg.Text, "Still processing") {
 			foundHeartbeat = true
-			if !strings.Contains(msg.Text, "已运行") {
+			if !strings.Contains(msg.Text, "elapsed") {
 				t.Fatalf("expected heartbeat to include elapsed duration, got %q", msg.Text)
 			}
 			break
@@ -1147,10 +1147,10 @@ func TestHandleIncomingMessage_DependencyErrorsReplyToUserWithoutPropagation(t *
 	if sender.reactions[0].EmojiType != "OnIt" {
 		t.Fatalf("expected OnIt reaction, got %q", sender.reactions[0].EmojiType)
 	}
-	if !strings.Contains(sender.messages[0].Text, "执行失败") {
+	if !strings.Contains(sender.messages[0].Text, "Execution failed") {
 		t.Fatalf("expected execution failure message, got %q", sender.messages[0].Text)
 	}
-	if !strings.Contains(sender.messages[0].Text, "诊断ID") {
+	if !strings.Contains(sender.messages[0].Text, "Diagnostic ID") {
 		t.Fatalf("expected diagnostic id in execution failure message, got %q", sender.messages[0].Text)
 	}
 }
