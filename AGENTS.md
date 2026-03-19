@@ -11,6 +11,10 @@ state persistence, and runtime defaults.
 When writing complex features or significant refactors, use an ExecPlan
 as described in `PLANS.md` from design to implementation.
 
+Plan files must be saved under `/Users/jujiajia/code/frieren-clone/docs/specs`.
+This repository rule overrides any default plan/spec output location suggested by skills
+(for example `writing-plans` defaults like `docs/superpowers/plans`) unless the user explicitly requests otherwise.
+
 # Logging Style
 
 - Use `logger.With(...)` only for context fields that are shared across multiple log lines, and reuse that derived logger.
