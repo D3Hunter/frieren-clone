@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -546,6 +547,50 @@ func TestSplitMarkdownChunks_DoesNotSplitInsideFencedCodeBlock(t *testing.T) {
 		if strings.Count(chunk, "```")%2 != 0 {
 			t.Fatalf("chunk %d contains unmatched code fence: %q", i, chunk)
 		}
+	}
+}
+
+func TestSplitMarkdownChunks_OversizedFencedBlockKeepsBalancedFencesPerChunk(t *testing.T) {
+	bodyLines := make([]string, 0, 120)
+	for i := 0; i < 120; i++ {
+		bodyLines = append(bodyLines, fmt.Sprintf("line-%03d: %s", i, strings.Repeat("x", 18)))
+	}
+	input := strings.Join([]string{
+		"```go",
+		strings.Join(bodyLines, "\n"),
+		"```",
+	}, "\n")
+
+	chunks := splitMarkdownChunks(input, 220)
+	if len(chunks) < 2 {
+		t.Fatalf("expected oversized fenced block to split into multiple chunks, got %d", len(chunks))
+	}
+	for i, chunk := range chunks {
+		if strings.Count(chunk, "```")%2 != 0 {
+			t.Fatalf("chunk %d contains unmatched code fence: %q", i, chunk)
+		}
+	}
+}
+
+func TestSplitMarkdownBlocks_FenceCloserRequiresWhitespaceSuffixOnly(t *testing.T) {
+	input := strings.Join([]string{
+		"```markdown",
+		"# literal examples",
+		"```json",
+		`{"ok": true}`,
+		"```",
+		"after",
+	}, "\n")
+
+	blocks := splitMarkdownBlocks(input)
+	if len(blocks) < 2 {
+		t.Fatalf("expected fenced block and trailing paragraph blocks, got %d", len(blocks))
+	}
+	if !strings.Contains(blocks[0], "```json\n{\"ok\": true}\n```") {
+		t.Fatalf("expected fence content line with language suffix to remain inside fenced block, got %q", blocks[0])
+	}
+	if strings.Contains(blocks[0], "after") {
+		t.Fatalf("expected trailing paragraph outside fenced block, got %q", blocks[0])
 	}
 }
 

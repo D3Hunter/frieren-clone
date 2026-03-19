@@ -286,6 +286,38 @@ func TestTranslateCodexMarkdownToFeishu_TableRowsDoNotContainDanglingBackticks(t
 	}
 }
 
+func TestRenderInlineCode_UsesFenceLongerThanContainedBackticks(t *testing.T) {
+	cases := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "no backticks uses single fence",
+			input:    "alpha",
+			expected: "`alpha`",
+		},
+		{
+			name:     "single backtick uses double fence",
+			input:    "alpha`beta",
+			expected: "``alpha`beta``",
+		},
+		{
+			name:     "double backticks use triple fence",
+			input:    "alpha``beta",
+			expected: "```alpha``beta```",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := renderInlineCode(tc.input); got != tc.expected {
+				t.Fatalf("expected %q, got %q", tc.expected, got)
+			}
+		})
+	}
+}
+
 func countUnescapedBackticks(value string) int {
 	count := 0
 	escaped := false

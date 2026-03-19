@@ -487,8 +487,27 @@ func renderInlineCode(value string) string {
 	if value == "" {
 		return "``"
 	}
-	if strings.Contains(value, "`") {
-		return "``" + strings.ReplaceAll(value, "\n", " ") + "``"
+	value = strings.ReplaceAll(value, "\n", " ")
+	fenceLen := maxConsecutiveRunes(value, '`') + 1
+	if fenceLen < 1 {
+		fenceLen = 1
 	}
-	return "`" + strings.ReplaceAll(value, "\n", " ") + "`"
+	fence := strings.Repeat("`", fenceLen)
+	return fence + value + fence
+}
+
+func maxConsecutiveRunes(value string, target rune) int {
+	maxRun := 0
+	current := 0
+	for _, r := range value {
+		if r == target {
+			current++
+			if current > maxRun {
+				maxRun = current
+			}
+			continue
+		}
+		current = 0
+	}
+	return maxRun
 }

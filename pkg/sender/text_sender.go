@@ -379,7 +379,7 @@ func splitMarkdownChunks(input string, maxRunes int) []string {
 				appendBlock(block)
 				continue
 			}
-			forced := splitChunks(block, maxRunes)
+			forced := splitOversizedMarkdownBlock(block, maxRunes)
 			chunks = append(chunks, forced...)
 			continue
 		}
@@ -409,7 +409,7 @@ func splitMarkdownChunks(input string, maxRunes int) []string {
 				appendBlock(block)
 				continue
 			}
-			forced := splitChunks(block, maxRunes)
+			forced := splitOversizedMarkdownBlock(block, maxRunes)
 			chunks = append(chunks, forced...)
 			continue
 		}
@@ -419,7 +419,7 @@ func splitMarkdownChunks(input string, maxRunes int) []string {
 			appendBlock(block)
 			continue
 		}
-		forced := splitChunks(block, maxRunes)
+		forced := splitOversizedMarkdownBlock(block, maxRunes)
 		chunks = append(chunks, forced...)
 	}
 
@@ -612,7 +612,69 @@ func isFenceCloser(line string, fenceChar rune, fenceLen int) bool {
 		}
 		break
 	}
-	return count >= fenceLen
+	if count < fenceLen {
+		return false
+	}
+	return strings.TrimSpace(trimmed[count:]) == ""
+}
+
+func splitOversizedMarkdownBlock(block string, maxRunes int) []string {
+	if maxRunes <= 0 {
+		return []string{block}
+	}
+	if utf8.RuneCountInString(block) <= maxRunes {
+		return []string{block}
+	}
+
+	lines := strings.SplitAfter(block, "\n")
+	if len(lines) == 0 {
+		return splitChunks(block, maxRunes)
+	}
+	trimmedStart := strings.TrimSpace(trimLineEnding(lines[0]))
+	fenceChar, fenceLen, ok := parseFenceMarker(trimmedStart)
+	if !ok {
+		return splitChunks(block, maxRunes)
+	}
+
+	closingIndex := -1
+	for i := len(lines) - 1; i >= 1; i-- {
+		candidate := strings.TrimSpace(trimLineEnding(lines[i]))
+		if isFenceCloser(candidate, fenceChar, fenceLen) {
+			closingIndex = i
+			break
+		}
+	}
+	if closingIndex <= 0 {
+		return splitChunks(block, maxRunes)
+	}
+
+	openFence := trimLineEnding(lines[0])
+	closeFence := trimLineEnding(lines[closingIndex])
+	// This guard handles pathological tiny chunk caps where one fenced chunk cannot fit even with empty body.
+	minWrapperRunes := utf8.RuneCountInString(openFence) + utf8.RuneCountInString(closeFence) + 2
+	if minWrapperRunes > maxRunes {
+		return splitChunks(block, maxRunes)
+	}
+
+	body := strings.Join(lines[1:closingIndex], "")
+	body = strings.TrimSuffix(body, "\n")
+	bodyMaxRunes := maxRunes - minWrapperRunes
+	bodyParts := []string{""}
+	if strings.TrimSpace(body) != "" {
+		bodyParts = splitChunks(body, bodyMaxRunes)
+	}
+
+	chunks := make([]string, 0, len(bodyParts)+1)
+	for _, part := range bodyParts {
+		part = strings.TrimSuffix(part, "\n")
+		chunks = append(chunks, openFence+"\n"+part+"\n"+closeFence)
+	}
+
+	suffix := strings.Join(lines[closingIndex+1:], "")
+	if strings.TrimSpace(suffix) == "" {
+		return chunks
+	}
+	return append(chunks, splitMarkdownChunks(suffix, maxRunes)...)
 }
 
 func isListItemLine(line string) bool {
