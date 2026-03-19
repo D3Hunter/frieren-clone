@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
@@ -15,6 +16,7 @@ import (
 const defaultMaxChunkRunes = 1800
 
 var markdownBulletPattern = regexp.MustCompile(`(?m)^\s*[-*+]\s+`)
+var markdownOrderedListPattern = regexp.MustCompile(`(?m)^\s*\d+\.\s+`)
 
 type messageAPI interface {
 	// Create sends a new chat message using Feishu's create-message API.
@@ -250,6 +252,9 @@ func shouldUseInteractiveMarkdown(text string) bool {
 	if markdownBulletPattern.MatchString(text) {
 		return true
 	}
+	if markdownOrderedListPattern.MatchString(text) {
+		return true
+	}
 	return false
 }
 
@@ -264,14 +269,41 @@ func splitChunks(input string, maxRunes int) []string {
 	if maxRunes <= 0 || utf8.RuneCountInString(input) <= maxRunes {
 		return []string{input}
 	}
-	chunks := []string{}
-	runes := []rune(input)
-	for start := 0; start < len(runes); start += maxRunes {
-		end := start + maxRunes
-		if end > len(runes) {
-			end = len(runes)
+
+	remaining := []rune(input)
+	chunks := make([]string, 0, len(remaining)/maxRunes+1)
+	for len(remaining) > 0 {
+		if len(remaining) <= maxRunes {
+			chunks = append(chunks, string(remaining))
+			break
 		}
-		chunks = append(chunks, strings.TrimSpace(string(runes[start:end])))
+
+		cut := chooseChunkCut(remaining, maxRunes)
+		chunks = append(chunks, string(remaining[:cut]))
+		remaining = remaining[cut:]
 	}
 	return chunks
+}
+
+func chooseChunkCut(runes []rune, maxRunes int) int {
+	if len(runes) <= maxRunes {
+		return len(runes)
+	}
+
+	// Prefer keeping whole lines to preserve list and paragraph readability.
+	for i := maxRunes - 1; i >= 0; i-- {
+		if runes[i] == '\n' {
+			return i + 1
+		}
+	}
+
+	// If a single line is too long, keep whole words when possible.
+	for i := maxRunes - 1; i >= 0; i-- {
+		if unicode.IsSpace(runes[i]) {
+			return i + 1
+		}
+	}
+
+	// Last resort for overlong single tokens (for example very long URLs).
+	return maxRunes
 }

@@ -139,6 +139,26 @@ func TestBuildContent_InteractivePreservesMarkdownListMarkers(t *testing.T) {
 	}
 }
 
+func TestSend_UsesInteractiveForOrderedLists(t *testing.T) {
+	api := &fakeMessageAPI{}
+	s := NewTextSender(api, &fakeReactionAPI{})
+
+	_, err := s.Send(context.Background(), SendRequest{
+		ChatID:           "oc_x",
+		ReplyToMessageID: "om_msg",
+		Text:             "1. first\n2. second\n\nplain tail",
+	})
+	if err != nil {
+		t.Fatalf("Send error: %v", err)
+	}
+	if len(api.replyReqs) != 1 {
+		t.Fatalf("expected one reply request, got %d", len(api.replyReqs))
+	}
+	if api.replyReqs[0].Body.MsgType == nil || *api.replyReqs[0].Body.MsgType != "interactive" {
+		t.Fatalf("expected interactive msg type, got %+v", api.replyReqs[0].Body.MsgType)
+	}
+}
+
 func TestSend_SplitsLongOutputIntoOrderedChunks(t *testing.T) {
 	api := &fakeMessageAPI{}
 	s := NewTextSender(api, &fakeReactionAPI{})
@@ -165,6 +185,55 @@ func TestSend_SplitsLongOutputIntoOrderedChunks(t *testing.T) {
 			t.Fatalf("chunk %d missing ordering prefix: %q", i, content["text"])
 		}
 	}
+}
+
+func TestSplitChunks_PrefersLineBoundaries(t *testing.T) {
+	input := strings.Join([]string{
+		"line-01 short",
+		"line-02 short",
+		"line-03 short",
+		"line-04 short",
+		"line-05 short",
+	}, "\n")
+
+	chunks := splitChunks(input, 36)
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(chunks))
+	}
+
+	for i, chunk := range chunks[:len(chunks)-1] {
+		if !strings.HasSuffix(chunk, "\n") {
+			t.Fatalf("expected chunk %d to end at line boundary, got %q", i, chunk)
+		}
+	}
+}
+
+func TestSplitChunks_FallsBackToWordBoundariesForLongSingleLine(t *testing.T) {
+	input := "alpha beta gamma delta epsilon zeta eta theta"
+	chunks := splitChunks(input, 12)
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(chunks))
+	}
+
+	if strings.Join(chunks, "") != input {
+		t.Fatalf("chunks should reconstruct original input, got %#v", chunks)
+	}
+	for i, chunk := range chunks {
+		if len([]rune(chunk)) > 12 {
+			t.Fatalf("chunk %d exceeds max runes: %q", i, chunk)
+		}
+		if i == len(chunks)-1 {
+			continue
+		}
+		lastRune := []rune(chunk)[len([]rune(chunk))-1]
+		if !lastRuneIsWhitespace(lastRune) {
+			t.Fatalf("expected chunk %d to end at whitespace boundary, got %q", i, chunk)
+		}
+	}
+}
+
+func lastRuneIsWhitespace(r rune) bool {
+	return r == ' ' || r == '\t' || r == '\n'
 }
 
 func TestSend_PropagatesAPIError(t *testing.T) {
