@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-const defaultReply = "收到，你的消息已处理。"
+const defaultReply = "Received. Your message has been processed."
 const (
 	defaultMCPEndpoint   = "http://localhost:8787/mcp"
 	defaultMCPTimeoutSec = 30

@@ -23,6 +23,17 @@ func TestParseProjectCommand(t *testing.T) {
 	}
 }
 
+func TestParseProjectCommand_AllowsMultilinePrompt(t *testing.T) {
+	input := "/tidb first line\nsecond line"
+	alias, prompt, ok := parseProjectCommand(input)
+	if !ok {
+		t.Fatal("expected project command for multiline prompt")
+	}
+	if alias != "tidb" || prompt != "first line\nsecond line" {
+		t.Fatalf("unexpected parse result: alias=%q prompt=%q", alias, prompt)
+	}
+}
+
 func TestFormatCodexOutput_RemovesStructuredPayloadAndKeepsMarkdown(t *testing.T) {
 	content := "`DXF` is **distributed**.\n\n- [`pkg/dxf/framework/doc.go:17`](/Users/jujiajia/code/pingcap/tidb/pkg/dxf/framework/doc.go:17)"
 	encodedPayload, err := json.MarshalIndent(map[string]string{
@@ -48,7 +59,7 @@ func TestFormatCodexOutput_RemovesStructuredPayloadAndKeepsMarkdown(t *testing.T
 	if !strings.Contains(got, "[`pkg/dxf/framework/doc.go:17`](/Users/jujiajia/code/pingcap/tidb/pkg/dxf/framework/doc.go:17)") {
 		t.Fatalf("expected markdown link preserved, got %q", got)
 	}
-	if !strings.Contains(got, "线程信息：") {
+	if !strings.Contains(got, "Thread info:") {
 		t.Fatalf("expected thread info section, got %q", got)
 	}
 	if !strings.HasSuffix(strings.TrimSpace(got), "codex_thread_id: codex_t1") {
