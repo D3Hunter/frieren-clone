@@ -1028,8 +1028,8 @@ func extractCodexStructuredPayload(output string) (content string, threadID stri
 		return "", "", false
 	}
 
-	content = strings.TrimSpace(stringMapValue(payload, "content"))
-	threadID = strings.TrimSpace(stringMapValue(payload, "threadId", "thread_id"))
+	content = strings.TrimSpace(extractCodexPayloadContent(payload))
+	threadID = strings.TrimSpace(findCodexThreadID(payload))
 	if content == "" && threadID == "" {
 		return "", "", false
 	}
@@ -1049,6 +1049,170 @@ func stringMapValue(payload map[string]any, keys ...string) string {
 			typed = strings.TrimSpace(typed)
 			if typed != "" {
 				return typed
+			}
+		}
+	}
+	return ""
+}
+
+func rawStringMapValue(payload map[string]any, key string) string {
+	value, ok := payload[key]
+	if !ok || value == nil {
+		return ""
+	}
+	typed, ok := value.(string)
+	if !ok {
+		return ""
+	}
+	return typed
+}
+
+func extractCodexPayloadContent(payload map[string]any) string {
+	if payload == nil {
+		return ""
+	}
+
+	// Keep existing behavior for direct payloads where top-level content is already the final assistant text.
+	if direct := strings.TrimSpace(stringMapValue(payload, "content")); direct != "" {
+		return direct
+	}
+
+	segments := collectCodexTextSegments(payload, false)
+	if len(segments) == 0 {
+		return ""
+	}
+
+	return strings.TrimSpace(strings.Join(segments, ""))
+}
+
+func collectCodexTextSegments(value any, insideAssistant bool) []string {
+	switch typed := value.(type) {
+	case map[string]any:
+		role := strings.ToLower(strings.TrimSpace(rawStringMapValue(typed, "role")))
+		nodeType := strings.ToLower(strings.TrimSpace(rawStringMapValue(typed, "type")))
+		nextInsideAssistant := insideAssistant || role == "assistant"
+
+		if text := rawStringMapValue(typed, "text"); strings.TrimSpace(text) != "" {
+			if nextInsideAssistant || nodeType == "output_text" || strings.Contains(nodeType, "delta") || nodeType == "text" {
+				return []string{text}
+			}
+		}
+		if delta := rawStringMapValue(typed, "delta"); strings.TrimSpace(delta) != "" {
+			if nextInsideAssistant || strings.Contains(nodeType, "delta") {
+				return []string{delta}
+			}
+		}
+
+		segments := make([]string, 0, 4)
+		visited := map[string]struct{}{}
+		appendFromKey := func(key string) {
+			child, ok := typed[key]
+			if !ok || child == nil {
+				return
+			}
+			visited[key] = struct{}{}
+			childSegments := collectCodexTextSegments(child, nextInsideAssistant)
+			if len(childSegments) == 0 {
+				return
+			}
+			segments = append(segments, childSegments...)
+		}
+
+		for _, key := range []string{
+			"messages",
+			"output",
+			"content",
+			"parts",
+			"items",
+			"response",
+			"result",
+			"data",
+		} {
+			appendFromKey(key)
+		}
+		if len(segments) > 0 {
+			return segments
+		}
+
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			if _, already := visited[key]; already {
+				continue
+			}
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			childSegments := collectCodexTextSegments(typed[key], nextInsideAssistant)
+			if len(childSegments) == 0 {
+				continue
+			}
+			segments = append(segments, childSegments...)
+		}
+		return segments
+	case []any:
+		segments := make([]string, 0, len(typed))
+		for _, child := range typed {
+			childSegments := collectCodexTextSegments(child, insideAssistant)
+			if len(childSegments) == 0 {
+				continue
+			}
+			segments = append(segments, childSegments...)
+		}
+		return segments
+	default:
+		return nil
+	}
+}
+
+func findCodexThreadID(value any) string {
+	switch typed := value.(type) {
+	case map[string]any:
+		if threadID := strings.TrimSpace(stringMapValue(typed, "threadId", "thread_id")); threadID != "" {
+			return threadID
+		}
+
+		visited := map[string]struct{}{}
+		findFromKey := func(key string) string {
+			child, ok := typed[key]
+			if !ok || child == nil {
+				return ""
+			}
+			visited[key] = struct{}{}
+			return findCodexThreadID(child)
+		}
+
+		for _, key := range []string{
+			"response",
+			"result",
+			"data",
+			"messages",
+			"output",
+			"content",
+			"items",
+		} {
+			if threadID := strings.TrimSpace(findFromKey(key)); threadID != "" {
+				return threadID
+			}
+		}
+
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			if _, already := visited[key]; already {
+				continue
+			}
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			if threadID := strings.TrimSpace(findCodexThreadID(typed[key])); threadID != "" {
+				return threadID
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if threadID := strings.TrimSpace(findCodexThreadID(child)); threadID != "" {
+				return threadID
 			}
 		}
 	}

@@ -121,6 +121,16 @@ func main() {
 		_ = logger.Sync()
 	}()
 
+	if simulationModeEnabled() {
+		logger.Info("simulation mode enabled", zap.String("env", simulationModeEnv))
+		if err := runSimulationMode(*cfg, logger); err != nil {
+			logger.Error("simulation mode failed", zap.Error(err))
+			os.Exit(1)
+		}
+		logger.Info("simulation mode completed successfully")
+		return
+	}
+
 	appClient := feishu.NewAppClient(*cfg, logger)
 	textSender := sender.NewTextSender(appClient.Im.V1.Message, appClient.Im.V1.MessageReaction)
 	topicStore, err := runtime.NewTopicStateStore(cfg.Runtime.TopicStateFile)
