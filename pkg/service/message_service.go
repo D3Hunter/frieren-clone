@@ -55,6 +55,7 @@ type OutgoingMessage struct {
 	ReplyToMessageID string
 	ThreadID         string
 	Text             string
+	RenderMode       string
 }
 
 // OutgoingReaction describes one emoji reaction to add on a user message.
@@ -125,6 +126,8 @@ const (
 	codexReplyToolName          = "codex-reply"
 	codexStatusToolName         = "codex-status"
 	mcpCodexTopicAlias          = "__mcp_codex__"
+	renderModePlainText         = "plain_text"
+	renderModeCodexMarkdown     = "codex_markdown"
 	defaultHelpMessage          = "Available commands:\n/help\n/mcp tools\n/mcp schema <tool>\n/mcp call <tool> <json>\n/<project> <prompt>\n\nNote: /mcp call codex always starts a new Codex thread."
 	codexPromptHelpMessage      = `Usage: /mcp call codex {"prompt":"<your prompt>"}`
 	defaultCodexModel           = "gpt-5.3-codex"
@@ -189,7 +192,7 @@ func (s *CommandService) HandleIncomingMessage(ctx context.Context, msg Incoming
 	msgLogger.Info("incoming feishu message", zap.String("raw_text", text))
 	if text == "" {
 		msgLogger.Info("incoming message has empty text")
-		_, err := s.send(ctx, msg, "Please enter a command. Use /help for usage.")
+		_, err := s.send(ctx, msg, "Please enter a command. Use /help for usage.", renderModePlainText)
 		return err
 	}
 	cleanText := stripMentions(text)
@@ -213,7 +216,7 @@ func (s *CommandService) HandleIncomingMessage(ctx context.Context, msg Incoming
 	if strings.HasPrefix(cleanText, "/") {
 		if s.requiresMention(cleanText, msg) {
 			msgLogger.Info("group slash command missing bot mention", zap.String("command_text", cleanText))
-			_, err := s.send(ctx, msg, groupMentionHelpMessage)
+			_, err := s.send(ctx, msg, groupMentionHelpMessage, renderModePlainText)
 			return err
 		}
 		return s.handleSlashCommand(ctx, msg, cleanText)
@@ -224,7 +227,7 @@ func (s *CommandService) HandleIncomingMessage(ctx context.Context, msg Incoming
 	}
 
 	msgLogger.Info("plain text without topic binding; returning help")
-	_, err := s.send(ctx, msg, "Use /help to see command syntax.")
+	_, err := s.send(ctx, msg, "Use /help to see command syntax.", renderModePlainText)
 	return err
 }
 
@@ -252,26 +255,26 @@ func (s *CommandService) handleSlashCommand(ctx context.Context, msg IncomingMes
 	msgLogger.Info("handling slash command", zap.String("command_text", cleanText))
 	switch {
 	case cleanText == "/help":
-		_, err := s.send(ctx, msg, defaultHelpMessage)
+		_, err := s.send(ctx, msg, defaultHelpMessage, renderModePlainText)
 		return err
 	case cleanText == "/mcp tools":
 		return s.handleMCPTools(ctx, msg)
 	case strings.HasPrefix(cleanText, "/mcp schema "):
 		tool := strings.TrimSpace(strings.TrimPrefix(cleanText, "/mcp schema "))
 		if tool == "" {
-			_, err := s.send(ctx, msg, "Usage: /mcp schema <tool>")
+			_, err := s.send(ctx, msg, "Usage: /mcp schema <tool>", renderModePlainText)
 			return err
 		}
 		return s.handleMCPSchema(ctx, msg, tool)
 	case strings.HasPrefix(cleanText, "/mcp call "):
 		tool, argsRaw, ok := parseMCPCallCommand(cleanText)
 		if !ok {
-			_, err := s.send(ctx, msg, "Usage: /mcp call <tool> <json>")
+			_, err := s.send(ctx, msg, "Usage: /mcp call <tool> <json>", renderModePlainText)
 			return err
 		}
 		var args map[string]any
 		if err := json.Unmarshal([]byte(argsRaw), &args); err != nil {
-			_, sendErr := s.send(ctx, msg, attachDiagnosticID(fmt.Sprintf("JSON parse failed: %v", err), msg))
+			_, sendErr := s.send(ctx, msg, attachDiagnosticID(fmt.Sprintf("JSON parse failed: %v", err), msg), renderModePlainText)
 			if sendErr != nil {
 				return sendErr
 			}
@@ -281,14 +284,14 @@ func (s *CommandService) handleSlashCommand(ctx context.Context, msg IncomingMes
 			args = map[string]any{}
 		}
 		if strings.EqualFold(tool, codexToolName) && strings.TrimSpace(stringArg(args, "prompt")) == "" {
-			_, err := s.send(ctx, msg, codexPromptHelpMessage)
+			_, err := s.send(ctx, msg, codexPromptHelpMessage, renderModePlainText)
 			return err
 		}
 		return s.handleMCPCall(ctx, msg, tool, args)
 	default:
 		alias, prompt, ok := parseProjectCommand(cleanText)
 		if !ok {
-			_, err := s.send(ctx, msg, defaultHelpMessage)
+			_, err := s.send(ctx, msg, defaultHelpMessage, renderModePlainText)
 			return err
 		}
 		msgLogger.Info(
@@ -298,7 +301,7 @@ func (s *CommandService) handleSlashCommand(ctx context.Context, msg IncomingMes
 		)
 		cwd, ok := s.cfg.ProjectAliasCWD[alias]
 		if !ok || strings.TrimSpace(cwd) == "" {
-			_, err := s.send(ctx, msg, fmt.Sprintf("%s: %s", unknownProjectHelpPrefix, alias))
+			_, err := s.send(ctx, msg, fmt.Sprintf("%s: %s", unknownProjectHelpPrefix, alias), renderModePlainText)
 			return err
 		}
 		outcome, err := s.executeWithHeartbeat(ctx, msg, func(runCtx context.Context) (commandOutcome, error) {
@@ -321,7 +324,7 @@ func (s *CommandService) handleSlashCommand(ctx context.Context, msg IncomingMes
 		if err != nil {
 			return s.replyCommandFailure(ctx, msg, "Execution failed", err)
 		}
-		finalReceipt, err := s.send(ctx, msg, formatCodexOutput(outcome.text, outcome.codexThreadID, outcome.tokenUsage))
+		finalReceipt, err := s.send(ctx, msg, formatCodexOutput(outcome.text, outcome.codexThreadID, outcome.tokenUsage), renderModeCodexMarkdown)
 		if err != nil {
 			return err
 		}
@@ -373,7 +376,7 @@ func (s *CommandService) handleMCPTools(ctx context.Context, msg IncomingMessage
 	if err != nil {
 		return s.replyCommandFailure(ctx, msg, "Failed to list tools", err)
 	}
-	_, err = s.send(ctx, msg, normalizeOutput(outcome.text))
+	_, err = s.send(ctx, msg, normalizeOutput(outcome.text), renderModePlainText)
 	return err
 }
 
@@ -388,7 +391,7 @@ func (s *CommandService) handleMCPSchema(ctx context.Context, msg IncomingMessag
 	if err != nil {
 		return s.replyCommandFailure(ctx, msg, "Failed to get schema", err)
 	}
-	_, err = s.send(ctx, msg, normalizeOutput(outcome.text))
+	_, err = s.send(ctx, msg, normalizeOutput(outcome.text), renderModePlainText)
 	return err
 }
 
@@ -422,7 +425,11 @@ func (s *CommandService) handleMCPCall(ctx context.Context, msg IncomingMessage,
 	if strings.EqualFold(tool, codexToolName) {
 		responseText = formatCodexOutput(outcome.text, outcome.codexThreadID, outcome.tokenUsage, codexNewThreadNotice)
 	}
-	finalReceipt, err := s.send(ctx, msg, responseText)
+	renderMode := renderModePlainText
+	if strings.EqualFold(tool, codexToolName) {
+		renderMode = renderModeCodexMarkdown
+	}
+	finalReceipt, err := s.send(ctx, msg, responseText, renderMode)
 	if err != nil {
 		return err
 	}
@@ -436,7 +443,7 @@ func (s *CommandService) handleTopicFollowup(ctx context.Context, msg IncomingMe
 	msgLogger := s.messageLogger(msg)
 	threadID := strings.TrimSpace(binding.CodexThreadID)
 	if threadID == "" {
-		_, err := s.send(ctx, msg, "No Codex thread is bound to this topic yet. Send a new slash command first.")
+		_, err := s.send(ctx, msg, "No Codex thread is bound to this topic yet. Send a new slash command first.", renderModePlainText)
 		return err
 	}
 	outcome, err := s.executeWithHeartbeat(ctx, msg, func(runCtx context.Context) (commandOutcome, error) {
@@ -464,7 +471,7 @@ func (s *CommandService) handleTopicFollowup(ctx context.Context, msg IncomingMe
 		}
 
 		notice := s.formatSessionResetNotice(msg, binding)
-		if _, noticeErr := s.send(ctx, msg, notice); noticeErr != nil {
+		if _, noticeErr := s.send(ctx, msg, notice, renderModePlainText); noticeErr != nil {
 			return noticeErr
 		}
 		msgLogger.Warn(
@@ -485,7 +492,7 @@ func (s *CommandService) handleTopicFollowup(ctx context.Context, msg IncomingMe
 			return s.replyCommandFailure(ctx, msg, "Execution failed", err)
 		}
 	}
-	finalReceipt, err := s.send(ctx, msg, formatCodexOutput(outcome.text, outcome.codexThreadID, outcome.tokenUsage))
+	finalReceipt, err := s.send(ctx, msg, formatCodexOutput(outcome.text, outcome.codexThreadID, outcome.tokenUsage), renderModeCodexMarkdown)
 	if err != nil {
 		return err
 	}
@@ -594,8 +601,8 @@ func (s *CommandService) executeWithHeartbeat(ctx context.Context, msg IncomingM
 			return res.outcome, res.err
 		case <-ticker.C:
 			heartbeatText := formatProcessingHeartbeat(time.Since(startedAt))
-			if _, heartbeatErr := s.send(ctx, msg, heartbeatText); heartbeatErr != nil {
-				s.outgoingMessageLogger(msg, heartbeatText).Error(
+			if _, heartbeatErr := s.send(ctx, msg, heartbeatText, renderModePlainText); heartbeatErr != nil {
+				s.outgoingMessageLogger(msg, heartbeatText, renderModePlainText).Error(
 					"send heartbeat failed",
 					zap.Duration("elapsed", time.Since(startedAt).Round(time.Second)),
 					zap.Error(heartbeatErr),
@@ -628,14 +635,16 @@ func formatElapsedDuration(elapsed time.Duration) string {
 	return fmt.Sprintf("%dm%02ds", minutes, seconds)
 }
 
-func (s *CommandService) send(ctx context.Context, msg IncomingMessage, text string) (SendReceipt, error) {
-	outgoingLogger := s.outgoingMessageLogger(msg, text)
+func (s *CommandService) send(ctx context.Context, msg IncomingMessage, text, renderMode string) (SendReceipt, error) {
+	renderMode = normalizeRenderMode(renderMode)
+	outgoingLogger := s.outgoingMessageLogger(msg, text, renderMode)
 	outgoingLogger.Info("outgoing feishu response")
 	receipt, err := s.sender.Send(ctx, OutgoingMessage{
 		ChatID:           msg.ChatID,
 		ReplyToMessageID: msg.MessageID,
 		ThreadID:         msg.ThreadID,
 		Text:             text,
+		RenderMode:       renderMode,
 	})
 	if err != nil {
 		outgoingLogger.Error("send feishu response failed", zap.Error(err))
@@ -658,7 +667,7 @@ func (s *CommandService) replyCommandFailure(ctx context.Context, msg IncomingMe
 		msgLogger.Error("command execution failed", zap.String("failure_message", text))
 	}
 	text = attachDiagnosticID(text, msg)
-	_, err := s.send(ctx, msg, text)
+	_, err := s.send(ctx, msg, text, renderModePlainText)
 	if err != nil {
 		return err
 	}
@@ -1213,8 +1222,8 @@ func (s *CommandService) messageLogger(msg IncomingMessage) *zap.Logger {
 	return s.logger.With(baseMessageLogFields(msg)...)
 }
 
-func (s *CommandService) outgoingMessageLogger(msg IncomingMessage, text string) *zap.Logger {
-	return s.logger.With(outgoingMessageLogFields(msg, text)...)
+func (s *CommandService) outgoingMessageLogger(msg IncomingMessage, text, renderMode string) *zap.Logger {
+	return s.logger.With(outgoingMessageLogFields(msg, text, renderMode)...)
 }
 
 func baseMessageLogFields(msg IncomingMessage) []zap.Field {
@@ -1241,16 +1250,25 @@ func baseMessageLogFields(msg IncomingMessage) []zap.Field {
 	}
 }
 
-func outgoingMessageLogFields(msg IncomingMessage, text string) []zap.Field {
+func outgoingMessageLogFields(msg IncomingMessage, text, renderMode string) []zap.Field {
 	fields := make([]zap.Field, 0, 9)
 	fields = append(fields, baseMessageLogFields(msg)...)
 	fields = append(
 		fields,
 		zap.String("reply_to_message_id", strings.TrimSpace(msg.MessageID)),
+		zap.String("render_mode", normalizeRenderMode(renderMode)),
 		zap.String("text", strings.TrimSpace(text)),
 		zap.Int("text_runes", utf8.RuneCountInString(strings.TrimSpace(text))),
 	)
 	return fields
+}
+
+func normalizeRenderMode(renderMode string) string {
+	renderMode = strings.TrimSpace(strings.ToLower(renderMode))
+	if renderMode == renderModeCodexMarkdown {
+		return renderModeCodexMarkdown
+	}
+	return renderModePlainText
 }
 
 func (s *CommandService) logCommandExecutionResult(msg IncomingMessage, startedAt time.Time, outcome commandOutcome, err error) {

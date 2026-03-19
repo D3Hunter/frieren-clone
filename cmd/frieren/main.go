@@ -60,6 +60,7 @@ func (a messageSenderAdapter) Send(ctx context.Context, msg service.OutgoingMess
 		ReplyToMessageID: msg.ReplyToMessageID,
 		ThreadID:         msg.ThreadID,
 		Text:             msg.Text,
+		RenderMode:       msg.RenderMode,
 	})
 	if err != nil {
 		return service.SendReceipt{}, err

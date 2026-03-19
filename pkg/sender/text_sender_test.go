@@ -17,6 +17,7 @@ type fakeMessageAPI struct {
 	createResp *larkim.CreateMessageResp
 	replyResp  *larkim.ReplyMessageResp
 	err        error
+	replyErrs  []error
 }
 
 func (f *fakeMessageAPI) Create(ctx context.Context, req *larkim.CreateMessageReq, opts ...larkcore.RequestOptionFunc) (*larkim.CreateMessageResp, error) {
@@ -32,6 +33,13 @@ func (f *fakeMessageAPI) Create(ctx context.Context, req *larkim.CreateMessageRe
 
 func (f *fakeMessageAPI) Reply(ctx context.Context, req *larkim.ReplyMessageReq, opts ...larkcore.RequestOptionFunc) (*larkim.ReplyMessageResp, error) {
 	f.replyReqs = append(f.replyReqs, req)
+	if len(f.replyErrs) > 0 {
+		nextErr := f.replyErrs[0]
+		f.replyErrs = f.replyErrs[1:]
+		if nextErr != nil {
+			return nil, nextErr
+		}
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -104,11 +112,16 @@ func TestSend_UsesTextForShortPlainText(t *testing.T) {
 	}
 }
 
-func TestSend_UsesInteractiveForMarkdownAndCode(t *testing.T) {
+func TestSend_CodexMarkdownModeUsesInteractiveCardMarkdown(t *testing.T) {
 	api := &fakeMessageAPI{}
 	s := NewTextSender(api, &fakeReactionAPI{})
 
-	_, err := s.Send(context.Background(), SendRequest{ChatID: "oc_x", ReplyToMessageID: "om_msg", Text: "```go\nfmt.Println(1)\n```"})
+	_, err := s.Send(context.Background(), SendRequest{
+		ChatID:           "oc_x",
+		ReplyToMessageID: "om_msg",
+		Text:             "```go\nfmt.Println(1)\n```",
+		RenderMode:       string(renderModeCodexMarkdown),
+	})
 	if err != nil {
 		t.Fatalf("Send error: %v", err)
 	}
@@ -121,8 +134,27 @@ func TestSend_UsesInteractiveForMarkdownAndCode(t *testing.T) {
 	if api.replyReqs[0].Body.Content == nil {
 		t.Fatal("expected card content")
 	}
-	if !strings.Contains(*api.replyReqs[0].Body.Content, "\"tag\":\"lark_md\"") {
-		t.Fatalf("expected lark_md card content, got %s", *api.replyReqs[0].Body.Content)
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(*api.replyReqs[0].Body.Content), &payload); err != nil {
+		t.Fatalf("expected valid interactive payload: %v", err)
+	}
+	if got := payload["schema"]; got != "2.0" {
+		t.Fatalf("expected schema 2.0, got %#v", got)
+	}
+	body, ok := payload["body"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected body object, got %#v", payload["body"])
+	}
+	elements, ok := body["elements"].([]any)
+	if !ok || len(elements) == 0 {
+		t.Fatalf("expected non-empty body elements, got %#v", body["elements"])
+	}
+	first, ok := elements[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected first element object, got %#v", elements[0])
+	}
+	if got := first["tag"]; got != "markdown" {
+		t.Fatalf("expected markdown element tag, got %#v", got)
 	}
 }
 
@@ -139,7 +171,7 @@ func TestBuildContent_InteractivePreservesMarkdownListMarkers(t *testing.T) {
 	}
 }
 
-func TestSend_UsesInteractiveForOrderedLists(t *testing.T) {
+func TestSend_DefaultModeKeepsMarkdownAsPlainText(t *testing.T) {
 	api := &fakeMessageAPI{}
 	s := NewTextSender(api, &fakeReactionAPI{})
 
@@ -154,8 +186,8 @@ func TestSend_UsesInteractiveForOrderedLists(t *testing.T) {
 	if len(api.replyReqs) != 1 {
 		t.Fatalf("expected one reply request, got %d", len(api.replyReqs))
 	}
-	if api.replyReqs[0].Body.MsgType == nil || *api.replyReqs[0].Body.MsgType != "interactive" {
-		t.Fatalf("expected interactive msg type, got %+v", api.replyReqs[0].Body.MsgType)
+	if api.replyReqs[0].Body.MsgType == nil || *api.replyReqs[0].Body.MsgType != "text" {
+		t.Fatalf("expected text msg type, got %+v", api.replyReqs[0].Body.MsgType)
 	}
 }
 
@@ -229,6 +261,78 @@ func TestSplitChunks_FallsBackToWordBoundariesForLongSingleLine(t *testing.T) {
 		if !lastRuneIsWhitespace(lastRune) {
 			t.Fatalf("expected chunk %d to end at whitespace boundary, got %q", i, chunk)
 		}
+	}
+}
+
+func TestSplitMarkdownChunks_DoesNotSplitInsideFencedCodeBlock(t *testing.T) {
+	input := strings.Join([]string{
+		"intro",
+		"",
+		"```go",
+		`fmt.Println("hello")`,
+		`fmt.Println("world")`,
+		"```",
+		"",
+		"tail " + strings.Repeat("x", 80),
+	}, "\n")
+
+	chunks := splitMarkdownChunks(input, 70)
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(chunks))
+	}
+	for i, chunk := range chunks {
+		if strings.Count(chunk, "```")%2 != 0 {
+			t.Fatalf("chunk %d contains unmatched code fence: %q", i, chunk)
+		}
+	}
+}
+
+func TestSplitMarkdownChunks_DoesNotSplitTableHeaderFromSeparator(t *testing.T) {
+	input := strings.Join([]string{
+		"# report",
+		"",
+		"| name | score |",
+		"| --- | --- |",
+		"| alpha | 1 |",
+		"| beta | 2 |",
+		"",
+		"appendix " + strings.Repeat("tail ", 30),
+	}, "\n")
+
+	chunks := splitMarkdownChunks(input, 75)
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(chunks))
+	}
+	for i, chunk := range chunks {
+		if strings.Contains(chunk, "| --- | --- |") && !strings.Contains(chunk, "| name | score |") {
+			t.Fatalf("chunk %d split table header from separator: %q", i, chunk)
+		}
+	}
+}
+
+func TestSend_CodexMarkdownModeFallsBackToPlainTextWhenCardFails(t *testing.T) {
+	api := &fakeMessageAPI{
+		replyErrs: []error{errors.New("interactive card failed"), nil},
+	}
+	s := NewTextSender(api, &fakeReactionAPI{})
+
+	_, err := s.Send(context.Background(), SendRequest{
+		ChatID:           "oc_x",
+		ReplyToMessageID: "om_msg",
+		Text:             "**bold**",
+		RenderMode:       string(renderModeCodexMarkdown),
+	})
+	if err != nil {
+		t.Fatalf("Send error: %v", err)
+	}
+	if len(api.replyReqs) != 2 {
+		t.Fatalf("expected interactive attempt + plain-text fallback, got %d requests", len(api.replyReqs))
+	}
+	if got := *api.replyReqs[0].Body.MsgType; got != "interactive" {
+		t.Fatalf("first attempt should be interactive, got %q", got)
+	}
+	if got := *api.replyReqs[1].Body.MsgType; got != "text" {
+		t.Fatalf("fallback should use text, got %q", got)
 	}
 }
 

@@ -15,8 +15,13 @@ import (
 
 const defaultMaxChunkRunes = 1800
 
-var markdownBulletPattern = regexp.MustCompile(`(?m)^\s*[-*+]\s+`)
-var markdownOrderedListPattern = regexp.MustCompile(`(?m)^\s*\d+\.\s+`)
+const (
+	renderModePlainText     = "plain_text"
+	renderModeCodexMarkdown = "codex_markdown"
+)
+
+var markdownListItemPattern = regexp.MustCompile(`^\s{0,3}(?:[-*+]|\d+[.)])\s+`)
+var markdownTableSeparatorPattern = regexp.MustCompile(`^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$`)
 
 type messageAPI interface {
 	// Create sends a new chat message using Feishu's create-message API.
@@ -36,6 +41,7 @@ type SendRequest struct {
 	ReplyToMessageID string
 	ThreadID         string
 	Text             string
+	RenderMode       string
 }
 
 // AddReactionRequest describes one emoji reaction request on an existing message.
@@ -79,22 +85,28 @@ func (s *TextSender) Send(ctx context.Context, req SendRequest) (SendReceipt, er
 		return SendReceipt{}, fmt.Errorf("text is required")
 	}
 
+	renderMode := normalizeRenderMode(req.RenderMode)
+	if renderMode == renderModeCodexMarkdown {
+		translated, err := translateCodexMarkdownToFeishu(text)
+		if err != nil {
+			return SendReceipt{}, fmt.Errorf("translate markdown for feishu: %w", err)
+		}
+		text = translated
+	}
+
 	chunks := splitChunks(text, s.maxChunkRunes)
+	if renderMode == renderModeCodexMarkdown {
+		chunks = splitMarkdownChunks(text, s.maxChunkRunes)
+	}
 	if len(chunks) > 1 {
 		for i, chunk := range chunks {
-			chunks[i] = fmt.Sprintf("[%d/%d] %s", i+1, len(chunks), chunk)
+			chunks[i] = withChunkPrefix(chunk, i, len(chunks), renderMode)
 		}
 	}
 
 	lastThreadID := strings.TrimSpace(req.ThreadID)
 	for _, chunk := range chunks {
-		msgType := selectMsgType(chunk)
-		content, err := buildContent(msgType, chunk)
-		if err != nil {
-			return SendReceipt{}, err
-		}
-
-		threadID, err := s.sendOne(ctx, chatID, strings.TrimSpace(req.ReplyToMessageID), msgType, content)
+		threadID, err := s.sendChunk(ctx, chatID, strings.TrimSpace(req.ReplyToMessageID), chunk, renderMode)
 		if err != nil {
 			return SendReceipt{}, err
 		}
@@ -104,6 +116,35 @@ func (s *TextSender) Send(ctx context.Context, req SendRequest) (SendReceipt, er
 	}
 
 	return SendReceipt{ThreadID: lastThreadID}, nil
+}
+
+func (s *TextSender) sendChunk(ctx context.Context, chatID, replyToMessageID, text, renderMode string) (string, error) {
+	if renderMode != renderModeCodexMarkdown {
+		content, err := buildContent("text", text)
+		if err != nil {
+			return "", err
+		}
+		return s.sendOne(ctx, chatID, replyToMessageID, "text", content)
+	}
+
+	interactiveContent, err := buildContent("interactive", text)
+	if err != nil {
+		return "", err
+	}
+	threadID, sendErr := s.sendOne(ctx, chatID, replyToMessageID, "interactive", interactiveContent)
+	if sendErr == nil {
+		return threadID, nil
+	}
+
+	plainContent, plainErr := buildContent("text", text)
+	if plainErr != nil {
+		return "", fmt.Errorf("send markdown card failed: %w (plain-text fallback encode failed: %v)", sendErr, plainErr)
+	}
+	threadID, fallbackErr := s.sendOne(ctx, chatID, replyToMessageID, "text", plainContent)
+	if fallbackErr != nil {
+		return "", fmt.Errorf("send markdown card failed: %w (plain-text fallback failed: %v)", sendErr, fallbackErr)
+	}
+	return threadID, nil
 }
 
 // AddReaction adds an emoji reaction to an existing Feishu message.
@@ -196,25 +237,18 @@ func (s *TextSender) sendOne(ctx context.Context, chatID, replyToMessageID, msgT
 	return "", nil
 }
 
-func selectMsgType(text string) string {
-	if shouldUseInteractiveMarkdown(text) {
-		return "interactive"
-	}
-	return "text"
-}
-
 func buildContent(msgType, text string) (string, error) {
 	if msgType == "interactive" {
-		text = normalizeLarkMarkdown(text)
+		text = normalizeMarkdown(text)
 		encoded, err := json.Marshal(map[string]any{
+			"schema": "2.0",
 			"config": map[string]any{
 				"wide_screen_mode": true,
 			},
-			"elements": []map[string]any{
-				{
-					"tag": "div",
-					"text": map[string]string{
-						"tag":     "lark_md",
+			"body": map[string]any{
+				"elements": []map[string]any{
+					{
+						"tag":     "markdown",
 						"content": text,
 					},
 				},
@@ -233,36 +267,26 @@ func buildContent(msgType, text string) (string, error) {
 	return string(encoded), nil
 }
 
-func shouldUseInteractiveMarkdown(text string) bool {
-	if strings.TrimSpace(text) == "" {
-		return false
-	}
-	if strings.Contains(text, "```") {
-		return true
-	}
-	if strings.Contains(text, "`") {
-		return true
-	}
-	if strings.Contains(text, "**") || strings.Contains(text, "__") {
-		return true
-	}
-	if strings.Contains(text, "](") && strings.Contains(text, "[") {
-		return true
-	}
-	if markdownBulletPattern.MatchString(text) {
-		return true
-	}
-	if markdownOrderedListPattern.MatchString(text) {
-		return true
-	}
-	return false
-}
-
-func normalizeLarkMarkdown(text string) string {
+func normalizeMarkdown(text string) string {
 	if strings.TrimSpace(text) == "" {
 		return text
 	}
 	return strings.ReplaceAll(text, "\r\n", "\n")
+}
+
+func normalizeRenderMode(mode string) string {
+	mode = strings.TrimSpace(strings.ToLower(mode))
+	if mode == renderModeCodexMarkdown {
+		return renderModeCodexMarkdown
+	}
+	return renderModePlainText
+}
+
+func withChunkPrefix(chunk string, index, total int, renderMode string) string {
+	if normalizeRenderMode(renderMode) == renderModeCodexMarkdown {
+		return fmt.Sprintf("[%d/%d]\n\n%s", index+1, total, chunk)
+	}
+	return fmt.Sprintf("[%d/%d] %s", index+1, total, chunk)
 }
 
 func splitChunks(input string, maxRunes int) []string {
@@ -306,4 +330,231 @@ func chooseChunkCut(runes []rune, maxRunes int) int {
 
 	// Last resort for overlong single tokens (for example very long URLs).
 	return maxRunes
+}
+
+func splitMarkdownChunks(input string, maxRunes int) []string {
+	input = normalizeMarkdown(input)
+	if maxRunes <= 0 || utf8.RuneCountInString(input) <= maxRunes {
+		return []string{input}
+	}
+
+	blocks := splitMarkdownBlocks(input)
+	if len(blocks) == 0 {
+		return splitChunks(input, maxRunes)
+	}
+
+	chunks := make([]string, 0, len(blocks))
+	current := strings.Builder{}
+	for _, block := range blocks {
+		if block == "" {
+			continue
+		}
+		if current.Len() == 0 {
+			if utf8.RuneCountInString(block) <= maxRunes {
+				current.WriteString(block)
+				continue
+			}
+			forced := splitChunks(block, maxRunes)
+			chunks = append(chunks, forced...)
+			continue
+		}
+
+		combined := current.String() + block
+		if utf8.RuneCountInString(combined) <= maxRunes {
+			current.WriteString(block)
+			continue
+		}
+
+		chunks = append(chunks, current.String())
+		current.Reset()
+		if utf8.RuneCountInString(block) <= maxRunes {
+			current.WriteString(block)
+			continue
+		}
+		forced := splitChunks(block, maxRunes)
+		chunks = append(chunks, forced...)
+	}
+
+	if current.Len() > 0 {
+		chunks = append(chunks, current.String())
+	}
+	if len(chunks) == 0 {
+		return []string{input}
+	}
+	return chunks
+}
+
+func splitMarkdownBlocks(input string) []string {
+	lines := strings.SplitAfter(input, "\n")
+	if len(lines) == 0 {
+		return []string{input}
+	}
+	if lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+
+	blocks := make([]string, 0, len(lines))
+	for i := 0; i < len(lines); {
+		line := trimLineEnding(lines[i])
+		trimmed := strings.TrimSpace(line)
+		start := i
+
+		if trimmed == "" {
+			for i < len(lines) && strings.TrimSpace(trimLineEnding(lines[i])) == "" {
+				i++
+			}
+			blocks = append(blocks, strings.Join(lines[start:i], ""))
+			continue
+		}
+
+		if fenceChar, fenceLen, ok := parseFenceMarker(trimmed); ok {
+			i++
+			for i < len(lines) {
+				next := strings.TrimSpace(trimLineEnding(lines[i]))
+				i++
+				if isFenceCloser(next, fenceChar, fenceLen) {
+					break
+				}
+			}
+			blocks = append(blocks, strings.Join(lines[start:i], ""))
+			continue
+		}
+
+		if i+1 < len(lines) && isTableHeaderLine(trimLineEnding(lines[i])) && isTableSeparatorLine(trimLineEnding(lines[i+1])) {
+			i += 2
+			for i < len(lines) && isTableRowLine(trimLineEnding(lines[i])) {
+				i++
+			}
+			blocks = append(blocks, strings.Join(lines[start:i], ""))
+			continue
+		}
+
+		if isListItemLine(line) {
+			i++
+			for i < len(lines) {
+				current := trimLineEnding(lines[i])
+				trimmedCurrent := strings.TrimSpace(current)
+				if trimmedCurrent == "" {
+					break
+				}
+				if fenceChar, fenceLen, ok := parseFenceMarker(strings.TrimSpace(current)); ok {
+					i++
+					for i < len(lines) {
+						next := strings.TrimSpace(trimLineEnding(lines[i]))
+						i++
+						if isFenceCloser(next, fenceChar, fenceLen) {
+							break
+						}
+					}
+					continue
+				}
+				if isListItemLine(current) || isListContinuationLine(current) {
+					i++
+					continue
+				}
+				break
+			}
+			blocks = append(blocks, strings.Join(lines[start:i], ""))
+			continue
+		}
+
+		i++
+		for i < len(lines) {
+			current := trimLineEnding(lines[i])
+			if strings.TrimSpace(current) == "" {
+				break
+			}
+			if _, _, ok := parseFenceMarker(strings.TrimSpace(current)); ok {
+				break
+			}
+			if i+1 < len(lines) && isTableHeaderLine(current) && isTableSeparatorLine(trimLineEnding(lines[i+1])) {
+				break
+			}
+			if isListItemLine(current) {
+				break
+			}
+			i++
+		}
+		blocks = append(blocks, strings.Join(lines[start:i], ""))
+	}
+	return blocks
+}
+
+func trimLineEnding(line string) string {
+	return strings.TrimRight(line, "\n")
+}
+
+func parseFenceMarker(line string) (rune, int, bool) {
+	if len(line) < 3 {
+		return 0, 0, false
+	}
+	first := rune(line[0])
+	if first != '`' && first != '~' {
+		return 0, 0, false
+	}
+	count := 0
+	for _, r := range line {
+		if r == first {
+			count++
+			continue
+		}
+		break
+	}
+	if count < 3 {
+		return 0, 0, false
+	}
+	return first, count, true
+}
+
+func isFenceCloser(line string, fenceChar rune, fenceLen int) bool {
+	if len(line) == 0 {
+		return false
+	}
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return false
+	}
+	count := 0
+	for _, r := range trimmed {
+		if r == fenceChar {
+			count++
+			continue
+		}
+		break
+	}
+	return count >= fenceLen
+}
+
+func isListItemLine(line string) bool {
+	return markdownListItemPattern.MatchString(line)
+}
+
+func isListContinuationLine(line string) bool {
+	return strings.HasPrefix(line, "  ") || strings.HasPrefix(line, "\t")
+}
+
+func isTableHeaderLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return false
+	}
+	if !strings.Contains(trimmed, "|") {
+		return false
+	}
+	return !markdownTableSeparatorPattern.MatchString(trimmed)
+}
+
+func isTableSeparatorLine(line string) bool {
+	return markdownTableSeparatorPattern.MatchString(strings.TrimSpace(line))
+}
+
+func isTableRowLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return false
+	}
+	if markdownTableSeparatorPattern.MatchString(trimmed) {
+		return false
+	}
+	return strings.Contains(trimmed, "|")
 }

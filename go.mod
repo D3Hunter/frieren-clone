@@ -6,6 +6,7 @@ require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/larksuite/oapi-sdk-go/v3 v3.5.3
 	github.com/modelcontextprotocol/go-sdk v1.3.1
+	github.com/yuin/goldmark v1.7.13
 	go.uber.org/zap v1.27.0
 )
 

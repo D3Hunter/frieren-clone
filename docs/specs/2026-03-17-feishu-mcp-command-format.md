@@ -229,14 +229,30 @@ Implemented in `pkg/sender/text_sender.go` and service heartbeat flow.
 - All service responses are sent as replies to incoming message id.
 - Reply API uses `reply_in_thread=true` to keep same topic chain behavior.
 - Content mode selection:
-  - always uses `text` to avoid extra post title rendering (for example bold `Frieren` title).
+  - default render mode is plain text (`text` message type),
+  - Codex final outputs (`/<project> <prompt>`, `/mcp call codex ...`, topic follow-up via `codex-reply`) use `codex_markdown` render mode,
+  - `/help`, `/mcp tools`, `/mcp schema`, heartbeat, session-reset notice, and failure/system messages stay plain text mode.
+- Codex markdown translation pipeline:
+  - parses Codex CommonMark/GFM output with Goldmark + GFM extensions,
+  - renders normalized Feishu-friendly markdown from AST,
+  - preserves core structures (headings, lists, quotes, fenced code, tables),
+  - converts non-http/non-https links (for example local file paths) into readable inline code/path text,
+  - escapes raw HTML blocks/inline HTML by default,
+  - degrades task list checkboxes to readable markdown markers.
+- Interactive payload for Codex markdown mode:
+  - uses Feishu `interactive` message with card JSON schema `2.0`,
+  - sends body element `{ "tag": "markdown", "content": "<translated markdown>" }`.
 - Codex footer formatting:
   - appends thread metadata section at the bottom as plain text,
   - includes `codex_thread_id`,
   - includes `context_window` token usage line when `codex-status` succeeds and usage can be parsed.
 - Long output splitting:
   - chunk at 1800 runes,
-  - each chunk prefixed with `[i/n]`.
+  - plain mode keeps rune/line-aware chunking,
+  - Codex markdown mode uses markdown-aware block chunking to avoid splitting fenced code/table/list blocks when possible,
+  - each chunk keeps ordering prefix (`[i/n]`).
+- Card send fallback:
+  - if sending one Codex markdown chunk as interactive card fails, sender retries that chunk once as plain `text`.
 - Processing feedback:
   - add immediate `OnIt` reaction on incoming user message,
   - send `Still processing (elapsed XmYYs), please wait...` every configured heartbeat interval (default 180 seconds) until completion.
@@ -251,6 +267,7 @@ Implemented tests include:
 - `pkg/service/command_service_test.go`
 - `pkg/handler/message_handler_test.go`
 - `pkg/sender/text_sender_test.go`
+- `pkg/sender/markdown_translator_test.go`
 
 Repository verification command:
 
