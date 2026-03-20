@@ -58,6 +58,31 @@ func TestTranslateCodexMarkdownToFeishu_DowngradesH1ToH2ForFeishuCompatibility(t
 	}
 }
 
+func TestTranslateCodexMarkdownToFeishu_DowngradesH5AndH6ForFeishuCompatibility(t *testing.T) {
+	input := strings.Join([]string{
+		"#### H4",
+		"##### H5",
+		"###### H6",
+	}, "\n")
+
+	output, err := translateCodexMarkdownToFeishu(input)
+	if err != nil {
+		t.Fatalf("translateCodexMarkdownToFeishu error: %v", err)
+	}
+	if !strings.Contains(output, "#### H4") {
+		t.Fatalf("expected h4 heading preserved, got %q", output)
+	}
+	if strings.Contains(output, "##### H5") || strings.Contains(output, "###### H6") {
+		t.Fatalf("expected h5/h6 headings downgraded for feishu compatibility, got %q", output)
+	}
+	if !strings.Contains(output, "#### H5") {
+		t.Fatalf("expected h5 downgraded to h4, got %q", output)
+	}
+	if !strings.Contains(output, "#### H6") {
+		t.Fatalf("expected h6 downgraded to h4, got %q", output)
+	}
+}
+
 func TestTranslateCodexMarkdownToFeishu_DegradesLocalFileLinksToInlineCode(t *testing.T) {
 	input := strings.Join([]string{
 		"[Local](/Users/jujiajia/code/frieren-clone/pkg/service/message_service.go)",
@@ -76,6 +101,27 @@ func TestTranslateCodexMarkdownToFeishu_DegradesLocalFileLinksToInlineCode(t *te
 	}
 	if !strings.Contains(output, "[Web](https://example.com/path)") {
 		t.Fatalf("expected https link preserved, got %q", output)
+	}
+}
+
+func TestTranslateCodexMarkdownToFeishu_DegradesMarkdownImagesToLinks(t *testing.T) {
+	input := strings.Join([]string{
+		"![Architecture](https://example.com/arch.png)",
+		"![Diagram](/tmp/diagram.png)",
+	}, "\n")
+
+	output, err := translateCodexMarkdownToFeishu(input)
+	if err != nil {
+		t.Fatalf("translateCodexMarkdownToFeishu error: %v", err)
+	}
+	if strings.Contains(output, "![Architecture](") {
+		t.Fatalf("expected markdown image syntax degraded for feishu compatibility, got %q", output)
+	}
+	if !strings.Contains(output, "[Architecture](https://example.com/arch.png)") {
+		t.Fatalf("expected http image converted to link, got %q", output)
+	}
+	if !strings.Contains(output, "Diagram (`/tmp/diagram.png`)") {
+		t.Fatalf("expected local image path degraded to readable text, got %q", output)
 	}
 }
 

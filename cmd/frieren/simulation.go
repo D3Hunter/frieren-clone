@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -26,8 +27,10 @@ const (
 
 	defaultSimulationRounds = 1
 
-	simulationPrompt = "/tidb give me a markdown example that you can output, include all support markdown elements in your output format, just to test. also give the level values for title. be longer than 2k"
+	simulationPrompt = "/tidb give me a markdown example that you can output, include all support markdown elements in your output format, just to test. also give the level values for title\nbe longer than 2k"
 )
+
+var unsupportedFeishuHeadingPattern = regexp.MustCompile(`(?m)^\s*#{5,6}\s+\S+`)
 
 func simulationModeEnabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(simulationModeEnv))) {
@@ -306,7 +309,105 @@ func hasUnrenderedArtifacts(text string) bool {
 			return true
 		}
 	}
-	return strings.Count(text, "```")%2 != 0
+	if hasUnsupportedHeadingOutsideFencedCode(text) {
+		return true
+	}
+	return hasUnbalancedFencedCodeDelimiters(text)
+}
+
+func hasUnsupportedHeadingOutsideFencedCode(text string) bool {
+	inFence := false
+	var fenceChar rune
+	fenceLen := 0
+
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if inFence {
+			if isFenceCloser(trimmed, fenceChar, fenceLen) {
+				inFence = false
+				fenceChar = 0
+				fenceLen = 0
+			}
+			continue
+		}
+		if markerChar, markerLen, ok := parseFenceMarker(trimmed); ok {
+			inFence = true
+			fenceChar = markerChar
+			fenceLen = markerLen
+			continue
+		}
+		// Feishu markdown cards have unreliable rendering for h5/h6; treat them as compatibility artifacts.
+		if unsupportedFeishuHeadingPattern.MatchString(line) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasUnbalancedFencedCodeDelimiters(text string) bool {
+	inFence := false
+	var fenceChar rune
+	fenceLen := 0
+
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if inFence {
+			if isFenceCloser(trimmed, fenceChar, fenceLen) {
+				inFence = false
+				fenceChar = 0
+				fenceLen = 0
+			}
+			continue
+		}
+		if markerChar, markerLen, ok := parseFenceMarker(trimmed); ok {
+			inFence = true
+			fenceChar = markerChar
+			fenceLen = markerLen
+		}
+	}
+	return inFence
+}
+
+func parseFenceMarker(line string) (rune, int, bool) {
+	if len(line) < 3 {
+		return 0, 0, false
+	}
+	first := rune(line[0])
+	if first != '`' && first != '~' {
+		return 0, 0, false
+	}
+
+	count := 0
+	for _, r := range line {
+		if r != first {
+			break
+		}
+		count++
+	}
+	if count < 3 {
+		return 0, 0, false
+	}
+	return first, count, true
+}
+
+func isFenceCloser(line string, fenceChar rune, fenceLen int) bool {
+	if fenceChar == 0 || fenceLen < 3 {
+		return false
+	}
+	if line == "" {
+		return false
+	}
+	count := 0
+	for _, r := range line {
+		if r != fenceChar {
+			break
+		}
+		count++
+	}
+	if count < fenceLen {
+		return false
+	}
+	return strings.TrimSpace(line[count:]) == ""
 }
 
 func isSimulationFailureReply(text string) bool {
