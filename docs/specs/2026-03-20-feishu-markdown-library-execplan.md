@@ -16,7 +16,7 @@ The immediate user-visible result is not a new bot command. The result is a reus
 - [x] (2026-03-20 12:56 CST) Confirmed extraction scope and guardrails: in-repo package, one-call API, Codex-markdown scope only, no intentional behavior changes, and subtask diff budget under 1000 LOC each.
 - [x] (2026-03-20 12:58 CST) Authored this ExecPlan under `docs/specs` per repository rules.
 - [x] (2026-03-20 16:35 CST) Milestone 1 complete: created `pkg/feishumarkdown` package shell (`doc.go`, `prepare.go`) with exported API contract and minimal tests in `prepare_test.go`; verified with `go test ./pkg/feishumarkdown ./pkg/sender`; milestone diff size: 93 insertions.
-- [ ] Milestone 2: Move translator runtime into the new package with parity tests.
+- [x] (2026-03-20 16:42 CST) Milestone 2 complete: moved translator runtime into `pkg/feishumarkdown/translator.go`, wired `PrepareCodexMarkdown` through the extracted translator, kept `pkg/sender/markdown_translator.go` as a thin compatibility wrapper, and added package-level translator parity tests; verified with a red-green cycle using `go test ./pkg/feishumarkdown` before extraction and `go test ./pkg/feishumarkdown ./pkg/sender` after extraction.
 - [ ] Milestone 3: Move markdown splitter runtime and chunk assembly into the new package.
 - [ ] Milestone 4: Switch sender to consume the new package and remove duplicate internals.
 - [ ] Milestone 5: Migrate and rebalance tests so behavior stays covered without duplication.
@@ -36,6 +36,12 @@ The immediate user-visible result is not a new bot command. The result is a reus
 
 - Observation: Milestone 1 default option normalization was initially non-observable through public output shape and required an internal seam for meaningful tests.
   Evidence: `normalizePrepareOptions` was introduced and covered by `TestNormalizePrepareOptions_*` to ensure `MaxChunkRunes <= 0` normalizes to `DefaultMaxChunkRunes` while preserving explicit values.
+
+- Observation: Sender translator tests still reach into an unexported helper, so removing `pkg/sender/markdown_translator.go` entirely would have forced premature sender test refactoring.
+  Evidence: `pkg/sender/markdown_translator_test.go` contains `TestRenderInlineCode_UsesFenceLongerThanContainedBackticks`, which directly exercises `renderInlineCode`.
+
+- Observation: `git diff --shortstat` does not include the new untracked package files created during this milestone, so it understates the working-tree size until those files are staged or otherwise accounted for.
+  Evidence: After creating `pkg/feishumarkdown/translator.go` and `pkg/feishumarkdown/translator_test.go`, `git diff --shortstat` reported only tracked-file edits while `git status --short` still showed both package files as untracked.
 
 ## Decision Log
 
@@ -63,11 +69,19 @@ The immediate user-visible result is not a new bot command. The result is a reus
   Rationale: The milestone contract does not expose chunk-budget effects yet, so helper-level tests validate default handling without introducing premature runtime behavior.
   Date/Author: 2026-03-20 / Codex
 
+- Decision: Make `PrepareCodexMarkdown` call the extracted translator during Milestone 2 even though chunk assembly remains a later milestone.
+  Rationale: This keeps the public package entry point observably useful now, lets TDD assert the extraction through package API behavior, and avoids introducing a second temporary translation seam.
+  Date/Author: 2026-03-20 / Codex
+
+- Decision: Retain a thin sender wrapper plus the local `renderInlineCode` helper until sender-local parser tests are rebalanced in Milestone 5.
+  Rationale: This keeps sender-facing behavior and existing sender tests stable without pulling test-migration work into the translator-extraction milestone.
+  Date/Author: 2026-03-20 / Codex
+
 ## Outcomes & Retrospective
 
-Milestone 1 shipped the reusable package shell and one-call API contract in `pkg/feishumarkdown` without changing runtime sender behavior. The package currently returns pass-through translated text and an initialized empty chunk slice by design, creating a stable API boundary for later extraction milestones.
+Milestone 1 shipped the reusable package shell and one-call API contract in `pkg/feishumarkdown` without changing runtime sender behavior. Milestone 2 now moves the markdown translation runtime into that package, adds package-level translator parity coverage, and keeps sender behavior stable via a thin wrapper. `PrepareCodexMarkdown` now returns translated Feishu-safe markdown plus the still-empty chunk slice placeholder.
 
-Remaining work includes translator extraction, splitter/chunk assembly extraction, sender integration, test rebalance, and documentation handoff milestones. No compatibility drift has been introduced at this stage; existing sender tests continue to pass.
+Remaining work includes splitter/chunk assembly extraction, sender integration cleanup, broader test rebalance, and documentation handoff milestones. No compatibility drift has been introduced in the targeted translator path so far; `go test ./pkg/feishumarkdown ./pkg/sender` passes after the extraction.
 
 ## Context and Orientation
 
@@ -222,6 +236,14 @@ Expected evidence snippets to capture during execution:
     go test ./...  # pass
     git diff --shortstat  # per-milestone LOC budget confirmation
 
+    go test ./pkg/feishumarkdown
+    --- FAIL: TestPrepareCodexMarkdown_TranslatesMarkdownForFeishu (0.00s)
+        prepare_test.go:53: expected translated heading output, got "# Title"
+
+    go test ./pkg/feishumarkdown ./pkg/sender
+    ok  	github.com/D3Hunter/frieren-clone/pkg/feishumarkdown	0.815s
+    ok  	github.com/D3Hunter/frieren-clone/pkg/sender	1.384s
+
 ## Interfaces and Dependencies
 
 New package interface:
@@ -257,6 +279,8 @@ Compatibility policy:
 
 1. This extraction is refactor-only by default.
 2. Any unavoidable behavior drift must be documented in `Decision Log`, reflected in tests, and called out in `Outcomes & Retrospective`.
+
+Revision note (2026-03-20 16:42 CST): Updated the living sections after Milestone 2 implementation to record the translator extraction, the temporary sender wrapper decision, and the red-green verification evidence.
 
 ---
 

@@ -32,8 +32,13 @@ type PreparedOutput struct {
 func PrepareCodexMarkdown(input string, opts PrepareOptions) (PreparedOutput, error) {
 	opts = normalizePrepareOptions(opts)
 
+	translated, err := TranslateCodexMarkdownToFeishu(input)
+	if err != nil {
+		return PreparedOutput{}, err
+	}
+
 	return PreparedOutput{
-		Translated: input,
+		Translated: translated,
 		Chunks:     make([]Chunk, 0),
 	}, nil
 }

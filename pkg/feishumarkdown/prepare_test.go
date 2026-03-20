@@ -31,12 +31,25 @@ func TestPrepareCodexMarkdown_OutputShapeContracts(t *testing.T) {
 	}
 
 	if got.Translated != input {
-		t.Fatalf("expected translated output to preserve input in milestone 1, got %q", got.Translated)
+		t.Fatalf("expected translated output to match the already-compatible input, got %q", got.Translated)
 	}
 	if got.Chunks == nil {
 		t.Fatalf("expected chunks slice to be initialized, got nil")
 	}
 	if len(got.Chunks) != 0 {
 		t.Fatalf("expected no chunks in milestone 1, got %d", len(got.Chunks))
+	}
+}
+
+func TestPrepareCodexMarkdown_TranslatesMarkdownForFeishu(t *testing.T) {
+	input := "# Title"
+
+	got, err := PrepareCodexMarkdown(input, PrepareOptions{})
+	if err != nil {
+		t.Fatalf("PrepareCodexMarkdown error: %v", err)
+	}
+
+	if got.Translated != "## Title" {
+		t.Fatalf("expected translated heading output, got %q", got.Translated)
 	}
 }
