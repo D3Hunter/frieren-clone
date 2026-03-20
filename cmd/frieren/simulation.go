@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/D3Hunter/frieren-clone/pkg/config"
+	"github.com/D3Hunter/frieren-clone/pkg/mcp"
 	"github.com/D3Hunter/frieren-clone/pkg/sender"
 	"github.com/D3Hunter/frieren-clone/pkg/service"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
@@ -19,8 +20,9 @@ import (
 )
 
 const (
-	simulationModeEnv   = "FRIEREN_SIMULATION_MODE"
-	simulationRoundsEnv = "FRIEREN_SIMULATION_ROUNDS"
+	simulationModeEnv    = "FRIEREN_SIMULATION_MODE"
+	simulationRoundsEnv  = "FRIEREN_SIMULATION_ROUNDS"
+	simulationRealMCPEnv = "FRIEREN_SIMULATION_REAL_MCP"
 
 	defaultSimulationRounds = 1
 
@@ -51,17 +53,42 @@ func simulationRounds() (int, error) {
 	return value, nil
 }
 
+func simulationUseRealMCP() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(simulationRealMCPEnv))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 func runSimulationMode(cfg config.Config, logger *zap.Logger) error {
 	rounds, err := simulationRounds()
 	if err != nil {
 		return err
 	}
 
+	mcpGateway := service.MCPGateway(&simulationMCPGateway{logger: logger.Named("simulation.mcp")})
+	closeMCPGateway := func() error { return nil }
+	if simulationUseRealMCP() {
+		realGateway := mcp.NewGateway(cfg.MCP.Endpoint, time.Duration(cfg.MCP.TimeoutSec)*time.Second)
+		mcpGateway = mcpGatewayAdapter{gateway: realGateway}
+		closeMCPGateway = realGateway.Close
+		logger.Info("simulation configured to use real mcp gateway", zap.String("endpoint", cfg.MCP.Endpoint))
+	} else {
+		logger.Info("simulation configured to use mocked mcp gateway")
+	}
+	defer func() {
+		if err := closeMCPGateway(); err != nil {
+			logger.Warn("close simulation mcp gateway failed", zap.Error(err))
+		}
+	}()
+
 	messageAPI := &simulationMessageAPI{logger: logger.Named("simulation.sender")}
 	reactionAPI := &simulationReactionAPI{logger: logger.Named("simulation.reaction")}
 	textSender := sender.NewTextSender(messageAPI, reactionAPI)
 	commandService := service.NewCommandService(service.CommandServiceDeps{
-		MCP:    &simulationMCPGateway{logger: logger.Named("simulation.mcp")},
+		MCP:    mcpGateway,
 		Sender: messageSenderAdapter{sender: textSender},
 		Logger: logger.Named("service"),
 		Config: service.CommandServiceConfig{
@@ -90,8 +117,12 @@ func runSimulationMode(cfg config.Config, logger *zap.Logger) error {
 		zap.Int("rounds", rounds),
 		zap.Int("reply_count", messageAPI.replyCount),
 		zap.Int("interactive_reply_count", messageAPI.interactiveReplyCount),
+		zap.Int("failure_count", messageAPI.failureCount),
 		zap.Int("unrendered_count", messageAPI.unrenderedCount),
 	)
+	if messageAPI.failureCount > 0 {
+		return fmt.Errorf("detected %d command failures in simulation replies", messageAPI.failureCount)
+	}
 	if messageAPI.unrenderedCount > 0 {
 		return fmt.Errorf("detected %d unrendered markdown chunks in simulation replies", messageAPI.unrenderedCount)
 	}
@@ -171,6 +202,7 @@ type simulationMessageAPI struct {
 	logger                *zap.Logger
 	replyCount            int
 	interactiveReplyCount int
+	failureCount          int
 	unrenderedCount       int
 }
 
@@ -211,6 +243,12 @@ func (m *simulationMessageAPI) Reply(_ context.Context, req *larkim.ReplyMessage
 			}
 		}
 	default:
+		if isSimulationFailureReply(content) {
+			m.failureCount++
+			if m.logger != nil {
+				m.logger.Error("simulation command failure reply detected", zap.String("preview", previewRunes(content, 240)))
+			}
+		}
 		if hasUnrenderedArtifacts(content) {
 			m.unrenderedCount++
 			if m.logger != nil {
@@ -269,6 +307,14 @@ func hasUnrenderedArtifacts(text string) bool {
 		}
 	}
 	return strings.Count(text, "```")%2 != 0
+}
+
+func isSimulationFailureReply(text string) bool {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return false
+	}
+	return strings.Contains(text, "Execution failed:") && strings.Contains(text, "Diagnostic ID:")
 }
 
 func previewRunes(text string, limit int) string {

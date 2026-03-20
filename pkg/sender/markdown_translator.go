@@ -5,6 +5,7 @@ import (
 	"html"
 	"net/url"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/yuin/goldmark"
 	gast "github.com/yuin/goldmark/ast"
@@ -144,6 +145,13 @@ func (r markdownASTRenderer) renderBlock(node gast.Node, listDepth int) string {
 	case *gast.FencedCodeBlock:
 		language := strings.TrimSpace(string(typed.Language(r.source)))
 		content := strings.TrimRight(blockLinesValue(typed.Lines(), r.source), "\n")
+		if isMarkdownFenceInfo(language) && shouldUnwrapMarkdownFenceContent(content) {
+			// Codex sometimes nests the real answer inside a markdown fenced block.
+			// Unwrap large markdown fences so Feishu renders structures instead of a giant code blob.
+			if rendered := renderEmbeddedMarkdownDocument(content); strings.TrimSpace(rendered) != "" {
+				return rendered
+			}
+		}
 		if language != "" {
 			return fmt.Sprintf("```%s\n%s\n```", language, content)
 		}
@@ -510,4 +518,47 @@ func maxConsecutiveRunes(value string, target rune) int {
 		current = 0
 	}
 	return maxRun
+}
+
+func shouldUnwrapMarkdownFenceContent(content string) bool {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return false
+	}
+
+	if utf8.RuneCountInString(content) >= 400 {
+		return true
+	}
+	if strings.Count(content, "\n") >= 12 {
+		return true
+	}
+
+	markerHits := 0
+	for _, marker := range []string{
+		"\n# ",
+		"\n## ",
+		"\n### ",
+		"\n- ",
+		"\n1. ",
+		"\n| ",
+		"\n```",
+	} {
+		if strings.Contains(content, marker) {
+			markerHits++
+		}
+	}
+	return markerHits >= 3
+}
+
+func renderEmbeddedMarkdownDocument(content string) string {
+	content = unwrapTopLevelMarkdownFence(normalizeMarkdown(content))
+	if strings.TrimSpace(content) == "" {
+		return ""
+	}
+
+	source := []byte(content)
+	markdown := goldmark.New(goldmark.WithExtensions(extension.GFM))
+	document := markdown.Parser().Parse(text.NewReader(source))
+	renderer := markdownASTRenderer{source: source}
+	return renderer.renderDocument(document)
 }

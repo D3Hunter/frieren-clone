@@ -167,6 +167,72 @@ func TestTranslateCodexMarkdownToFeishu_UnwrapsTopLevelMarkdownFence(t *testing.
 	}
 }
 
+func TestTranslateCodexMarkdownToFeishu_UnwrapsLargeInnerMarkdownFence(t *testing.T) {
+	input := strings.Join([]string{
+		"Intro paragraph before a wrapped markdown block.",
+		"",
+		"```markdown",
+		"# Wrapped Markdown Title",
+		"",
+		"## Wrapped Section",
+		"",
+		"- item one",
+		"- item two",
+		"",
+		"```bash",
+		"echo wrapped",
+		"```",
+		"",
+		"| Name | Value |",
+		"| --- | --- |",
+		"| alpha | 1 |",
+		"",
+		strings.Repeat("long wrapped markdown paragraph for render testing. ", 30),
+		"```",
+		"",
+		"Footer after wrapped markdown block.",
+	}, "\n")
+
+	output, err := translateCodexMarkdownToFeishu(input)
+	if err != nil {
+		t.Fatalf("translateCodexMarkdownToFeishu error: %v", err)
+	}
+	if strings.Contains(output, "```markdown") {
+		t.Fatalf("expected inner markdown wrapper removed, got %q", output)
+	}
+	if !strings.Contains(output, "## Wrapped Markdown Title") {
+		t.Fatalf("expected wrapped heading rendered as markdown heading, got %q", output)
+	}
+	if !strings.Contains(output, "```bash\necho wrapped\n```") {
+		t.Fatalf("expected nested fenced code block preserved, got %q", output)
+	}
+	if !strings.Contains(output, "| Name | Value |") || !strings.Contains(output, "| alpha | 1 |") {
+		t.Fatalf("expected wrapped table rendered, got %q", output)
+	}
+	if !strings.Contains(output, "Footer after wrapped markdown block.") {
+		t.Fatalf("expected footer text preserved, got %q", output)
+	}
+}
+
+func TestTranslateCodexMarkdownToFeishu_KeepsSmallMarkdownFenceAsCode(t *testing.T) {
+	input := strings.Join([]string{
+		"Code sample:",
+		"",
+		"```markdown",
+		"# tiny",
+		"- item",
+		"```",
+	}, "\n")
+
+	output, err := translateCodexMarkdownToFeishu(input)
+	if err != nil {
+		t.Fatalf("translateCodexMarkdownToFeishu error: %v", err)
+	}
+	if !strings.Contains(output, "```markdown") {
+		t.Fatalf("expected small markdown fence to remain code block, got %q", output)
+	}
+}
+
 func TestTranslateCodexMarkdownToFeishu_UnwrapsMarkdownFenceWithNestedCodeAndPreservesFollowingBlocks(t *testing.T) {
 	input := strings.Join([]string{
 		"```markdown",
