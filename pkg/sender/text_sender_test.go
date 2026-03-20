@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -523,128 +522,6 @@ func TestSplitChunks_FallsBackToWordBoundariesForLongSingleLine(t *testing.T) {
 		lastRune := []rune(chunk)[len([]rune(chunk))-1]
 		if !lastRuneIsWhitespace(lastRune) {
 			t.Fatalf("expected chunk %d to end at whitespace boundary, got %q", i, chunk)
-		}
-	}
-}
-
-func TestSplitMarkdownChunks_DoesNotSplitInsideFencedCodeBlock(t *testing.T) {
-	input := strings.Join([]string{
-		"intro",
-		"",
-		"```go",
-		`fmt.Println("hello")`,
-		`fmt.Println("world")`,
-		"```",
-		"",
-		"tail " + strings.Repeat("x", 80),
-	}, "\n")
-
-	chunks := splitMarkdownChunks(input, 70)
-	if len(chunks) < 2 {
-		t.Fatalf("expected multiple chunks, got %d", len(chunks))
-	}
-	for i, chunk := range chunks {
-		if strings.Count(chunk, "```")%2 != 0 {
-			t.Fatalf("chunk %d contains unmatched code fence: %q", i, chunk)
-		}
-	}
-}
-
-func TestSplitMarkdownChunks_OversizedFencedBlockKeepsBalancedFencesPerChunk(t *testing.T) {
-	bodyLines := make([]string, 0, 120)
-	for i := 0; i < 120; i++ {
-		bodyLines = append(bodyLines, fmt.Sprintf("line-%03d: %s", i, strings.Repeat("x", 18)))
-	}
-	input := strings.Join([]string{
-		"```go",
-		strings.Join(bodyLines, "\n"),
-		"```",
-	}, "\n")
-
-	chunks := splitMarkdownChunks(input, 220)
-	if len(chunks) < 2 {
-		t.Fatalf("expected oversized fenced block to split into multiple chunks, got %d", len(chunks))
-	}
-	for i, chunk := range chunks {
-		if strings.Count(chunk, "```")%2 != 0 {
-			t.Fatalf("chunk %d contains unmatched code fence: %q", i, chunk)
-		}
-	}
-}
-
-func TestSplitMarkdownBlocks_FenceCloserRequiresWhitespaceSuffixOnly(t *testing.T) {
-	input := strings.Join([]string{
-		"```markdown",
-		"# literal examples",
-		"```json",
-		`{"ok": true}`,
-		"```",
-		"after",
-	}, "\n")
-
-	blocks := splitMarkdownBlocks(input)
-	if len(blocks) < 2 {
-		t.Fatalf("expected fenced block and trailing paragraph blocks, got %d", len(blocks))
-	}
-	if !strings.Contains(blocks[0], "```json\n{\"ok\": true}\n```") {
-		t.Fatalf("expected fence content line with language suffix to remain inside fenced block, got %q", blocks[0])
-	}
-	if strings.Contains(blocks[0], "after") {
-		t.Fatalf("expected trailing paragraph outside fenced block, got %q", blocks[0])
-	}
-}
-
-func TestSplitMarkdownChunks_DoesNotSplitTableHeaderFromSeparator(t *testing.T) {
-	input := strings.Join([]string{
-		"# report",
-		"",
-		"| name | score |",
-		"| --- | --- |",
-		"| alpha | 1 |",
-		"| beta | 2 |",
-		"",
-		"appendix " + strings.Repeat("tail ", 30),
-	}, "\n")
-
-	chunks := splitMarkdownChunks(input, 75)
-	if len(chunks) < 2 {
-		t.Fatalf("expected multiple chunks, got %d", len(chunks))
-	}
-	for i, chunk := range chunks {
-		if strings.Contains(chunk, "| --- | --- |") && !strings.Contains(chunk, "| name | score |") {
-			t.Fatalf("chunk %d split table header from separator: %q", i, chunk)
-		}
-	}
-}
-
-func TestSplitMarkdownChunks_KeepsSectionHeadingWithFollowingTableBlock(t *testing.T) {
-	intro := strings.Repeat("Intro paragraph content to consume chunk budget. ", 12)
-	input := strings.Join([]string{
-		intro,
-		"",
-		"## Table Alignment Test",
-		"",
-		"| Left align | Center align | Right align |",
-		"|:---|:---:|---:|",
-		"| apple | red | 10 |",
-		"| banana | yellow | 200 |",
-		"| cherry | dark red | 3000 |",
-		"",
-		"tail",
-	}, "\n")
-
-	chunks := splitMarkdownChunks(input, 680)
-	if len(chunks) < 2 {
-		t.Fatalf("expected split into multiple chunks, got %d", len(chunks))
-	}
-	for i, chunk := range chunks {
-		hasTable := strings.Contains(chunk, "| Left align | Center align | Right align |") ||
-			strings.Contains(chunk, "|:---|:---:|---:|")
-		if !hasTable {
-			continue
-		}
-		if !strings.Contains(chunk, "## Table Alignment Test") {
-			t.Fatalf("expected table chunk %d to include its section heading, got %q", i, chunk)
 		}
 	}
 }

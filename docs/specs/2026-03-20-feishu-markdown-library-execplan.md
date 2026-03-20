@@ -17,7 +17,7 @@ The immediate user-visible result is not a new bot command. The result is a reus
 - [x] (2026-03-20 12:58 CST) Authored this ExecPlan under `docs/specs` per repository rules.
 - [x] (2026-03-20 16:35 CST) Milestone 1 complete: created `pkg/feishumarkdown` package shell (`doc.go`, `prepare.go`) with exported API contract and minimal tests in `prepare_test.go`; verified with `go test ./pkg/feishumarkdown ./pkg/sender`; milestone diff size: 93 insertions.
 - [x] (2026-03-20 16:42 CST) Milestone 2 complete: moved translator runtime into `pkg/feishumarkdown/translator.go`, wired `PrepareCodexMarkdown` through the extracted translator, kept `pkg/sender/markdown_translator.go` as a thin compatibility wrapper, and added package-level translator parity tests; verified with a red-green cycle using `go test ./pkg/feishumarkdown` before extraction and `go test ./pkg/feishumarkdown ./pkg/sender` after extraction.
-- [ ] Milestone 3: Move markdown splitter runtime and chunk assembly into the new package.
+- [x] (2026-03-20 17:30 CST) Milestone 3 complete: moved markdown-aware splitter runtime into `pkg/feishumarkdown/splitter.go`, made `PrepareCodexMarkdown` compose translation + splitting + markdown suffix ordering markers, kept sender behavior unchanged via a thin splitter wrapper, and moved milestone-critical splitter parity coverage into package-level tests; verified with a red-green cycle using `go test ./pkg/feishumarkdown` (initially failed with `undefined: splitMarkdownChunks`) and `go test ./pkg/feishumarkdown ./pkg/sender` after extraction.
 - [ ] Milestone 4: Switch sender to consume the new package and remove duplicate internals.
 - [ ] Milestone 5: Migrate and rebalance tests so behavior stays covered without duplication.
 - [ ] Milestone 6: Add full usage docs and one-prompt integration doc for other agents/projects.
@@ -42,6 +42,9 @@ The immediate user-visible result is not a new bot command. The result is a reus
 
 - Observation: `git diff --shortstat` does not include the new untracked package files created during this milestone, so it understates the working-tree size until those files are staged or otherwise accounted for.
   Evidence: After creating `pkg/feishumarkdown/translator.go` and `pkg/feishumarkdown/translator_test.go`, `git diff --shortstat` reported only tracked-file edits while `git status --short` still showed both package files as untracked.
+
+- Observation: Milestone 3 could move the splitter without switching sender to the full library pipeline by leaving a thin sender-local wrapper around the extracted splitter entry point.
+  Evidence: `pkg/sender/text_sender.go` now delegates `splitMarkdownChunks` to `feishumarkdown.SplitTranslatedMarkdown`, while sender still performs translation and per-chunk send/fallback exactly as before.
 
 ## Decision Log
 
@@ -79,9 +82,9 @@ The immediate user-visible result is not a new bot command. The result is a reus
 
 ## Outcomes & Retrospective
 
-Milestone 1 shipped the reusable package shell and one-call API contract in `pkg/feishumarkdown` without changing runtime sender behavior. Milestone 2 now moves the markdown translation runtime into that package, adds package-level translator parity coverage, and keeps sender behavior stable via a thin wrapper. `PrepareCodexMarkdown` now returns translated Feishu-safe markdown plus the still-empty chunk slice placeholder.
+Milestone 1 shipped the reusable package shell and one-call API contract in `pkg/feishumarkdown` without changing runtime sender behavior. Milestone 2 moved the markdown translation runtime into that package, added package-level translator parity coverage, and kept sender behavior stable via a thin wrapper. Milestone 3 now moves markdown-aware splitting into `pkg/feishumarkdown`, makes `PrepareCodexMarkdown` return sender-compatible ordered chunks, and keeps current sender runtime behavior stable by delegating only the splitter helper.
 
-Remaining work includes splitter/chunk assembly extraction, sender integration cleanup, broader test rebalance, and documentation handoff milestones. No compatibility drift has been introduced in the targeted translator path so far; `go test ./pkg/feishumarkdown ./pkg/sender` passes after the extraction.
+Remaining work includes sender integration cleanup, broader test rebalance, and documentation handoff milestones. No compatibility drift has been introduced in the targeted translator/splitter path so far; `go test ./pkg/feishumarkdown ./pkg/sender` passes after the extraction.
 
 ## Context and Orientation
 

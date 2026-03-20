@@ -36,8 +36,14 @@ func TestPrepareCodexMarkdown_OutputShapeContracts(t *testing.T) {
 	if got.Chunks == nil {
 		t.Fatalf("expected chunks slice to be initialized, got nil")
 	}
-	if len(got.Chunks) != 0 {
-		t.Fatalf("expected no chunks in milestone 1, got %d", len(got.Chunks))
+	if len(got.Chunks) != 1 {
+		t.Fatalf("expected one prepared chunk for short markdown, got %d", len(got.Chunks))
+	}
+	if got.Chunks[0].Index != 1 || got.Chunks[0].Total != 1 {
+		t.Fatalf("expected chunk metadata {Index:1 Total:1}, got %+v", got.Chunks[0])
+	}
+	if got.Chunks[0].Content != input {
+		t.Fatalf("expected chunk content to match translated markdown, got %q", got.Chunks[0].Content)
 	}
 }
 
