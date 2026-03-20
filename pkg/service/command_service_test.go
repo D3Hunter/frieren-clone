@@ -299,6 +299,9 @@ func TestHandleIncomingMessage_HelpCommand(t *testing.T) {
 	if len(sender.messages) == 0 {
 		t.Fatal("expected help response")
 	}
+	if sender.messages[len(sender.messages)-1].RenderMode != renderModePlainText {
+		t.Fatalf("expected help response plain render mode, got %q", sender.messages[len(sender.messages)-1].RenderMode)
+	}
 	if !strings.Contains(sender.messages[len(sender.messages)-1].Text, "/mcp tools") {
 		t.Fatalf("unexpected help text: %q", sender.messages[len(sender.messages)-1].Text)
 	}
@@ -569,19 +572,22 @@ func TestHandleIncomingMessage_ProjectCommandFormatsCodexOutputForFeishuText(t *
 		t.Fatal("expected at least one response message")
 	}
 	got := sender.messages[len(sender.messages)-1].Text
+	if sender.messages[len(sender.messages)-1].RenderMode != renderModeCodexMarkdown {
+		t.Fatalf("expected codex markdown render mode, got %q", sender.messages[len(sender.messages)-1].RenderMode)
+	}
 	if strings.Contains(got, `"threadId"`) || strings.Contains(got, `"content"`) {
 		t.Fatalf("expected structured payload hidden from user message, got %q", got)
 	}
 	if !strings.Contains(got, "`DXF`") || !strings.Contains(got, "**distributed task framework**") {
 		t.Fatalf("expected markdown syntax preserved for rich rendering sender, got %q", got)
 	}
-	if !strings.Contains(got, "Thread info:") {
+	if !strings.Contains(got, "### Thread info") {
 		t.Fatalf("expected thread info section, got %q", got)
 	}
-	if !strings.Contains(got, "context_window: 123K / 272K tokens used (55% left)") {
+	if !strings.Contains(got, "- context_window: 123K / 272K tokens used (55% left)") {
 		t.Fatalf("expected context window usage footer, got %q", got)
 	}
-	if !strings.HasSuffix(strings.TrimSpace(got), "codex_thread_id: codex_t1") {
+	if !strings.HasSuffix(strings.TrimSpace(got), "- codex_thread_id: `codex_t1`") {
 		t.Fatalf("expected thread id in bottom section, got %q", got)
 	}
 }
@@ -640,8 +646,11 @@ func TestHandleIncomingMessage_TopicFollowupUsesBoundThread(t *testing.T) {
 	if gotThreadID := mcp.callHistory[1].args["threadId"]; gotThreadID != "codex_abc" {
 		t.Fatalf("unexpected codex-status thread id arg: %#v", gotThreadID)
 	}
-	if len(sender.messages) == 0 || !strings.Contains(sender.messages[len(sender.messages)-1].Text, "context_window: 100K / 272K tokens used (63% left)") {
+	if len(sender.messages) == 0 || !strings.Contains(sender.messages[len(sender.messages)-1].Text, "- context_window: 100K / 272K tokens used (63% left)") {
 		t.Fatalf("expected context window footer on follow-up response, got %+v", sender.messages)
+	}
+	if sender.messages[len(sender.messages)-1].RenderMode != renderModeCodexMarkdown {
+		t.Fatalf("expected follow-up response codex markdown mode, got %q", sender.messages[len(sender.messages)-1].RenderMode)
 	}
 }
 
@@ -708,6 +717,12 @@ func TestHandleIncomingMessage_TopicFollowupSessionTimeoutNotifiesAndStartsNewTh
 	}
 	if len(sender.messages) != 2 {
 		t.Fatalf("expected session-reset notice and final response, got %d messages", len(sender.messages))
+	}
+	if sender.messages[0].RenderMode != renderModePlainText {
+		t.Fatalf("expected session reset notice plain mode, got %q", sender.messages[0].RenderMode)
+	}
+	if sender.messages[1].RenderMode != renderModeCodexMarkdown {
+		t.Fatalf("expected final follow-up response codex markdown mode, got %q", sender.messages[1].RenderMode)
 	}
 	if !strings.Contains(sender.messages[0].Text, "expired Codex session") {
 		t.Fatalf("expected first message to mention session expiration, got %q", sender.messages[0].Text)
@@ -853,6 +868,9 @@ func TestHandleIncomingMessage_MCPCallCodexExplainsNewThreadBehavior(t *testing.
 
 	if len(sender.messages) != 1 {
 		t.Fatalf("expected one response message, got %d", len(sender.messages))
+	}
+	if sender.messages[0].RenderMode != renderModeCodexMarkdown {
+		t.Fatalf("expected codex call response codex markdown mode, got %q", sender.messages[0].RenderMode)
 	}
 	if !strings.Contains(sender.messages[0].Text, "/mcp call codex") {
 		t.Fatalf("expected response to explain new-thread behavior, got %q", sender.messages[0].Text)

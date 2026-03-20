@@ -11,6 +11,10 @@ state persistence, and runtime defaults.
 When writing complex features or significant refactors, use an ExecPlan
 as described in `PLANS.md` from design to implementation.
 
+Plan files must be saved under `/Users/jujiajia/code/frieren-clone/docs/specs`.
+This repository rule overrides any default plan/spec output location suggested by skills
+(for example `writing-plans` defaults like `docs/superpowers/plans`) unless the user explicitly requests otherwise.
+
 # Logging Style
 
 - Use `logger.With(...)` only for context fields that are shared across multiple log lines, and reuse that derived logger.
@@ -25,6 +29,10 @@ as described in `PLANS.md` from design to implementation.
 - Every interface method declaration must also have a comment line, and the comment must start with that method name.
 - Comments should explain what the target does and, when useful, how it does it.
 - Keep comment length proportional to complexity: simple wrappers can use one sentence; workflow-heavy logic should use richer context.
+
+# Special Handling Branches
+
+- When adding special-case handling branches (for example compatibility fallbacks, provider quirks, or non-obvious guard paths), add an in-code comment that explains why the branch exists.
 
 # PR Workflow
 
