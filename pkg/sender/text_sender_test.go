@@ -8,6 +8,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/D3Hunter/frieren-clone/pkg/feishumarkdown"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
@@ -552,6 +553,114 @@ func TestSend_CodexMarkdownModeFallsBackToPlainTextWhenCardFails(t *testing.T) {
 	}
 }
 
+func TestSend_CodexMarkdownModeUsesPreparedChunksFromLibrary(t *testing.T) {
+	originalPrepare := prepareCodexMarkdown
+	t.Cleanup(func() {
+		prepareCodexMarkdown = originalPrepare
+	})
+
+	var gotInput string
+	var gotOptions feishumarkdown.PrepareOptions
+	prepareCodexMarkdown = func(input string, opts feishumarkdown.PrepareOptions) (feishumarkdown.PreparedOutput, error) {
+		gotInput = input
+		gotOptions = opts
+		return feishumarkdown.PreparedOutput{
+			Translated: "ignored translated markdown",
+			Chunks: []feishumarkdown.Chunk{
+				{Index: 1, Total: 2, Content: "## prepared chunk one\n\n[1/2]"},
+				{Index: 2, Total: 2, Content: "## prepared chunk two\n\n[2/2]"},
+			},
+		}, nil
+	}
+
+	api := &fakeMessageAPI{}
+	s := NewTextSender(api, &fakeReactionAPI{})
+
+	_, err := s.Send(context.Background(), SendRequest{
+		ChatID:           "oc_x",
+		ReplyToMessageID: "om_msg",
+		Text:             "  # from codex  ",
+		RenderMode:       string(renderModeCodexMarkdown),
+	})
+	if err != nil {
+		t.Fatalf("Send error: %v", err)
+	}
+	if gotInput != "# from codex" {
+		t.Fatalf("expected trimmed input passed to preparer, got %q", gotInput)
+	}
+	if gotOptions.MaxChunkRunes != defaultMaxMarkdownChunkRunes {
+		t.Fatalf("expected markdown preparer chunk cap %d, got %d", defaultMaxMarkdownChunkRunes, gotOptions.MaxChunkRunes)
+	}
+	if len(api.replyReqs) != 2 {
+		t.Fatalf("expected sender to emit prepared chunk count, got %d requests", len(api.replyReqs))
+	}
+	for i, req := range api.replyReqs {
+		if req.Body == nil || req.Body.MsgType == nil || *req.Body.MsgType != "interactive" {
+			t.Fatalf("chunk %d expected interactive message, got %+v", i, req.Body)
+		}
+		md := interactiveMarkdownContentFromReply(t, req)
+		want := "## prepared chunk one\n\n[1/2]"
+		if i == 1 {
+			want = "## prepared chunk two\n\n[2/2]"
+		}
+		if md != want {
+			t.Fatalf("chunk %d expected prepared markdown %q, got %q", i, want, md)
+		}
+	}
+}
+
+func TestSend_CodexMarkdownModeFallsBackPerPreparedChunk(t *testing.T) {
+	originalPrepare := prepareCodexMarkdown
+	t.Cleanup(func() {
+		prepareCodexMarkdown = originalPrepare
+	})
+
+	prepareCodexMarkdown = func(input string, opts feishumarkdown.PrepareOptions) (feishumarkdown.PreparedOutput, error) {
+		return feishumarkdown.PreparedOutput{
+			Translated: input,
+			Chunks: []feishumarkdown.Chunk{
+				{Index: 1, Total: 2, Content: "## prepared chunk one\n\n[1/2]"},
+				{Index: 2, Total: 2, Content: "## prepared chunk two\n\n[2/2]"},
+			},
+		}, nil
+	}
+
+	api := &fakeMessageAPI{
+		replyErrs: []error{nil, errors.New("interactive card failed"), nil},
+	}
+	s := NewTextSender(api, &fakeReactionAPI{})
+
+	_, err := s.Send(context.Background(), SendRequest{
+		ChatID:           "oc_x",
+		ReplyToMessageID: "om_msg",
+		Text:             "# from codex",
+		RenderMode:       string(renderModeCodexMarkdown),
+	})
+	if err != nil {
+		t.Fatalf("Send error: %v", err)
+	}
+	if len(api.replyReqs) != 3 {
+		t.Fatalf("expected per-chunk retry pattern interactive, interactive, text; got %d requests", len(api.replyReqs))
+	}
+	if got := *api.replyReqs[0].Body.MsgType; got != "interactive" {
+		t.Fatalf("first prepared chunk should send as interactive, got %q", got)
+	}
+	if got := *api.replyReqs[1].Body.MsgType; got != "interactive" {
+		t.Fatalf("second prepared chunk should try interactive first, got %q", got)
+	}
+	if got := *api.replyReqs[2].Body.MsgType; got != "text" {
+		t.Fatalf("failed prepared chunk should retry as text, got %q", got)
+	}
+
+	var content map[string]string
+	if err := json.Unmarshal([]byte(*api.replyReqs[2].Body.Content), &content); err != nil {
+		t.Fatalf("fallback content should be plain-text JSON: %v", err)
+	}
+	if content["text"] != "## prepared chunk two\n\n[2/2]" {
+		t.Fatalf("expected fallback to reuse prepared chunk content, got %q", content["text"])
+	}
+}
+
 func lastRuneIsWhitespace(r rune) bool {
 	return r == ' ' || r == '\t' || r == '\n'
 }
@@ -584,4 +693,29 @@ func TestAddReaction_UsesMessageReactionAPI(t *testing.T) {
 
 func strPtr(v string) *string {
 	return &v
+}
+
+func interactiveMarkdownContentFromReply(t *testing.T, req *larkim.ReplyMessageReq) string {
+	t.Helper()
+
+	if req.Body == nil || req.Body.Content == nil {
+		t.Fatal("expected reply body content")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(*req.Body.Content), &payload); err != nil {
+		t.Fatalf("expected valid interactive payload: %v", err)
+	}
+	body, ok := payload["body"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected body object, got %#v", payload["body"])
+	}
+	elements, ok := body["elements"].([]any)
+	if !ok || len(elements) == 0 {
+		t.Fatalf("expected non-empty body elements, got %#v", body["elements"])
+	}
+	md, ok := elements[0].(map[string]any)["content"].(string)
+	if !ok {
+		t.Fatalf("expected markdown content string, got %#v", elements[0])
+	}
+	return md
 }

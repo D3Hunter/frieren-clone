@@ -18,7 +18,7 @@ The immediate user-visible result is not a new bot command. The result is a reus
 - [x] (2026-03-20 16:35 CST) Milestone 1 complete: created `pkg/feishumarkdown` package shell (`doc.go`, `prepare.go`) with exported API contract and minimal tests in `prepare_test.go`; verified with `go test ./pkg/feishumarkdown ./pkg/sender`; milestone diff size: 93 insertions.
 - [x] (2026-03-20 16:42 CST) Milestone 2 complete: moved translator runtime into `pkg/feishumarkdown/translator.go`, wired `PrepareCodexMarkdown` through the extracted translator, kept `pkg/sender/markdown_translator.go` as a thin compatibility wrapper, and added package-level translator parity tests; verified with a red-green cycle using `go test ./pkg/feishumarkdown` before extraction and `go test ./pkg/feishumarkdown ./pkg/sender` after extraction.
 - [x] (2026-03-20 17:30 CST) Milestone 3 complete: moved markdown-aware splitter runtime into `pkg/feishumarkdown/splitter.go`, made `PrepareCodexMarkdown` compose translation + splitting + markdown suffix ordering markers, kept sender behavior unchanged via a thin splitter wrapper, and moved milestone-critical splitter parity coverage into package-level tests; verified with a red-green cycle using `go test ./pkg/feishumarkdown` (initially failed with `undefined: splitMarkdownChunks`) and `go test ./pkg/feishumarkdown ./pkg/sender` after extraction.
-- [ ] Milestone 4: Switch sender to consume the new package and remove duplicate internals.
+- [x] (2026-03-20 17:36 CST) Milestone 4 complete: refactored `pkg/sender/text_sender.go` to call `feishumarkdown.PrepareCodexMarkdown` for codex markdown mode, kept plain-text chunking untouched, preserved per-chunk interactive-then-text fallback semantics, removed sender-local markdown translation/splitting flow from runtime, and verified with a red-green cycle using `go test ./pkg/sender` (initially failed with `undefined: prepareCodexMarkdown`) followed by `go test ./pkg/feishumarkdown ./pkg/sender ./pkg/service`; milestone diff size: `git diff --shortstat` => `3 files changed, 196 insertions(+), 29 deletions(-)`.
 - [ ] Milestone 5: Migrate and rebalance tests so behavior stays covered without duplication.
 - [ ] Milestone 6: Add full usage docs and one-prompt integration doc for other agents/projects.
 - [ ] Milestone 7: Run full verification and record evidence.
@@ -45,6 +45,12 @@ The immediate user-visible result is not a new bot command. The result is a reus
 
 - Observation: Milestone 3 could move the splitter without switching sender to the full library pipeline by leaving a thin sender-local wrapper around the extracted splitter entry point.
   Evidence: `pkg/sender/text_sender.go` now delegates `splitMarkdownChunks` to `feishumarkdown.SplitTranslatedMarkdown`, while sender still performs translation and per-chunk send/fallback exactly as before.
+
+- Observation: Sender still needs to supply an explicit markdown chunk cap when calling the library because the sender's general chunk budget (`1800`) is intentionally higher than the interactive-safe markdown budget (`1380`).
+  Evidence: `TestSend_CodexMarkdownModeUsesPreparedChunksFromLibrary` asserts that sender passes `defaultMaxMarkdownChunkRunes` into `PrepareCodexMarkdown`, and the targeted verification set stays green.
+
+- Observation: A tiny package-level function seam in sender makes the new library integration directly unit-testable without changing runtime behavior.
+  Evidence: Milestone 4 red state was `go test ./pkg/sender` failing with `undefined: prepareCodexMarkdown`; after introducing the seam and wiring `Send` through it, the new sender tests passed.
 
 ## Decision Log
 
@@ -80,11 +86,19 @@ The immediate user-visible result is not a new bot command. The result is a reus
   Rationale: This keeps sender-facing behavior and existing sender tests stable without pulling test-migration work into the translator-extraction milestone.
   Date/Author: 2026-03-20 / Codex
 
+- Decision: Keep the interactive-safe markdown cap logic in sender even after switching runtime preparation to `feishumarkdown.PrepareCodexMarkdown`.
+  Rationale: The library default matches the safe Feishu markdown budget, but sender still carries a broader plain-text chunk budget (`1800`); preserving the sender-side cap avoids accidental single-card sends if that plain-text budget changes or is overridden in tests.
+  Date/Author: 2026-03-20 / Codex
+
+- Decision: Introduce a sender-local `prepareCodexMarkdown` function variable as a test seam.
+  Rationale: This allows sender tests to prove that `Send` consumes prepared library chunks directly and preserves per-chunk fallback behavior, without adding a new exported interface or changing runtime call sites.
+  Date/Author: 2026-03-20 / Codex
+
 ## Outcomes & Retrospective
 
-Milestone 1 shipped the reusable package shell and one-call API contract in `pkg/feishumarkdown` without changing runtime sender behavior. Milestone 2 moved the markdown translation runtime into that package, added package-level translator parity coverage, and kept sender behavior stable via a thin wrapper. Milestone 3 now moves markdown-aware splitting into `pkg/feishumarkdown`, makes `PrepareCodexMarkdown` return sender-compatible ordered chunks, and keeps current sender runtime behavior stable by delegating only the splitter helper.
+Milestone 1 shipped the reusable package shell and one-call API contract in `pkg/feishumarkdown` without changing runtime sender behavior. Milestone 2 moved the markdown translation runtime into that package, added package-level translator parity coverage, and kept sender behavior stable via a thin wrapper. Milestone 3 moved markdown-aware splitting into `pkg/feishumarkdown`, made `PrepareCodexMarkdown` return sender-compatible ordered chunks, and kept sender runtime behavior stable by delegating only the splitter helper. Milestone 4 finishes the first real consumer migration by switching `pkg/sender/text_sender.go` to the library pipeline, leaving plain-text handling untouched and preserving the per-chunk interactive fallback path.
 
-Remaining work includes sender integration cleanup, broader test rebalance, and documentation handoff milestones. No compatibility drift has been introduced in the targeted translator/splitter path so far; `go test ./pkg/feishumarkdown ./pkg/sender` passes after the extraction.
+Remaining work includes test rebalance, documentation handoff, and full-suite verification. No compatibility drift has been introduced in the targeted sender/library path so far; `go test ./pkg/feishumarkdown ./pkg/sender ./pkg/service` passes after the Milestone 4 integration.
 
 ## Context and Orientation
 
@@ -206,6 +220,21 @@ Suggested verification cadence:
     go test ./pkg/service
     go test ./...
 
+Milestone 4 evidence captured during execution:
+
+    go test ./pkg/sender
+    # github.com/D3Hunter/frieren-clone/pkg/sender [github.com/D3Hunter/frieren-clone/pkg/sender.test]
+    pkg/sender/text_sender_test.go:557:21: undefined: prepareCodexMarkdown
+    FAIL    github.com/D3Hunter/frieren-clone/pkg/sender [build failed]
+
+    go test ./pkg/sender
+    ok      github.com/D3Hunter/frieren-clone/pkg/sender  0.488s
+
+    go test ./pkg/feishumarkdown ./pkg/sender ./pkg/service
+    ok      github.com/D3Hunter/frieren-clone/pkg/feishumarkdown   (cached)
+    ok      github.com/D3Hunter/frieren-clone/pkg/sender           (cached)
+    ok      github.com/D3Hunter/frieren-clone/pkg/service          (cached)
+
 ## Validation and Acceptance
 
 The implementation is accepted when all conditions are true:
@@ -284,6 +313,7 @@ Compatibility policy:
 2. Any unavoidable behavior drift must be documented in `Decision Log`, reflected in tests, and called out in `Outcomes & Retrospective`.
 
 Revision note (2026-03-20 16:42 CST): Updated the living sections after Milestone 2 implementation to record the translator extraction, the temporary sender wrapper decision, and the red-green verification evidence.
+Revision note (2026-03-20 17:36 CST): Updated the living sections after Milestone 4 implementation to record the sender integration, the new sender test seam, the explicit markdown-cap decision, and the red-green verification evidence.
 
 ---
 
