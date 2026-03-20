@@ -19,7 +19,7 @@ The immediate user-visible result is not a new bot command. The result is a reus
 - [x] (2026-03-20 16:42 CST) Milestone 2 complete: moved translator runtime into `pkg/feishumarkdown/translator.go`, wired `PrepareCodexMarkdown` through the extracted translator, kept `pkg/sender/markdown_translator.go` as a thin compatibility wrapper, and added package-level translator parity tests; verified with a red-green cycle using `go test ./pkg/feishumarkdown` before extraction and `go test ./pkg/feishumarkdown ./pkg/sender` after extraction.
 - [x] (2026-03-20 17:30 CST) Milestone 3 complete: moved markdown-aware splitter runtime into `pkg/feishumarkdown/splitter.go`, made `PrepareCodexMarkdown` compose translation + splitting + markdown suffix ordering markers, kept sender behavior unchanged via a thin splitter wrapper, and moved milestone-critical splitter parity coverage into package-level tests; verified with a red-green cycle using `go test ./pkg/feishumarkdown` (initially failed with `undefined: splitMarkdownChunks`) and `go test ./pkg/feishumarkdown ./pkg/sender` after extraction.
 - [x] (2026-03-20 17:36 CST) Milestone 4 complete: refactored `pkg/sender/text_sender.go` to call `feishumarkdown.PrepareCodexMarkdown` for codex markdown mode, kept plain-text chunking untouched, preserved per-chunk interactive-then-text fallback semantics, removed sender-local markdown translation/splitting flow from runtime, and verified with a red-green cycle using `go test ./pkg/sender` (initially failed with `undefined: prepareCodexMarkdown`) followed by `go test ./pkg/feishumarkdown ./pkg/sender ./pkg/service`; milestone diff size: `git diff --shortstat` => `3 files changed, 196 insertions(+), 29 deletions(-)`.
-- [ ] Milestone 5: Migrate and rebalance tests so behavior stays covered without duplication.
+- [x] (2026-03-20 18:24 CST) Milestone 5 complete: moved remaining translator-compatibility assertions and default interactive-safety chunk coverage into `pkg/feishumarkdown`, trimmed sender tests back to delivery responsibilities, removed `pkg/sender/markdown_translator.go` plus its redundant parser-focused test file, and verified with `go test ./pkg/feishumarkdown`, `go test ./pkg/sender`, and `go test ./pkg/feishumarkdown ./pkg/sender ./pkg/service`; milestone diff size: `git diff --stat -- pkg/feishumarkdown pkg/sender` => `5 files changed, 206 insertions(+), 755 deletions(-)`.
 - [ ] Milestone 6: Add full usage docs and one-prompt integration doc for other agents/projects.
 - [ ] Milestone 7: Run full verification and record evidence.
 
@@ -51,6 +51,9 @@ The immediate user-visible result is not a new bot command. The result is a reus
 
 - Observation: A tiny package-level function seam in sender makes the new library integration directly unit-testable without changing runtime behavior.
   Evidence: Milestone 4 red state was `go test ./pkg/sender` failing with `undefined: prepareCodexMarkdown`; after introducing the seam and wiring `Send` through it, the new sender tests passed.
+
+- Observation: Prepared markdown chunks can grow slightly beyond a caller-supplied split budget because `[i/n]` ordering suffixes are appended after splitting.
+  Evidence: A targeted check against `PrepareCodexMarkdown(..., PrepareOptions{MaxChunkRunes: 1400})` produced chunks of `1402` runes, while the default `1380` budget stayed under the sender's historical `1400` interactive-safety ceiling.
 
 ## Decision Log
 
@@ -94,11 +97,15 @@ The immediate user-visible result is not a new bot command. The result is a reus
   Rationale: This allows sender tests to prove that `Send` consumes prepared library chunks directly and preserves per-chunk fallback behavior, without adding a new exported interface or changing runtime call sites.
   Date/Author: 2026-03-20 / Codex
 
+- Decision: Remove the sender-local translator compatibility wrapper and migrate the remaining compatibility assertions into `pkg/feishumarkdown` during Milestone 5.
+  Rationale: Sender no longer owns markdown translation behavior at runtime, so keeping parser-focused tests or wrapper-only helpers under `pkg/sender` would preserve duplication without adding sender-specific confidence.
+  Date/Author: 2026-03-20 / Codex
+
 ## Outcomes & Retrospective
 
-Milestone 1 shipped the reusable package shell and one-call API contract in `pkg/feishumarkdown` without changing runtime sender behavior. Milestone 2 moved the markdown translation runtime into that package, added package-level translator parity coverage, and kept sender behavior stable via a thin wrapper. Milestone 3 moved markdown-aware splitting into `pkg/feishumarkdown`, made `PrepareCodexMarkdown` return sender-compatible ordered chunks, and kept sender runtime behavior stable by delegating only the splitter helper. Milestone 4 finishes the first real consumer migration by switching `pkg/sender/text_sender.go` to the library pipeline, leaving plain-text handling untouched and preserving the per-chunk interactive fallback path.
+Milestone 1 shipped the reusable package shell and one-call API contract in `pkg/feishumarkdown` without changing runtime sender behavior. Milestone 2 moved the markdown translation runtime into that package, added package-level translator parity coverage, and kept sender behavior stable via a thin wrapper. Milestone 3 moved markdown-aware splitting into `pkg/feishumarkdown`, made `PrepareCodexMarkdown` return sender-compatible ordered chunks, and kept sender runtime behavior stable by delegating only the splitter helper. Milestone 4 finishes the first real consumer migration by switching `pkg/sender/text_sender.go` to the library pipeline, leaving plain-text handling untouched and preserving the per-chunk interactive fallback path. Milestone 5 rebalanced the tests around that boundary: compatibility rules now primarily live under `pkg/feishumarkdown`, sender tests focus on delivery semantics, and the obsolete sender-local translator wrapper has been removed.
 
-Remaining work includes test rebalance, documentation handoff, and full-suite verification. No compatibility drift has been introduced in the targeted sender/library path so far; `go test ./pkg/feishumarkdown ./pkg/sender ./pkg/service` passes after the Milestone 4 integration.
+Remaining work includes documentation handoff and full-suite verification. No compatibility drift has been introduced in the targeted sender/library path so far; `go test ./pkg/feishumarkdown ./pkg/sender ./pkg/service` passes after the Milestone 5 test rebalance.
 
 ## Context and Orientation
 
@@ -106,9 +113,10 @@ Inbound Feishu messages flow through handler and command service layers, then in
 
 - `pkg/handler/message_handler.go` normalizes incoming Feishu events.
 - `pkg/service/message_service.go` routes command and follow-up logic, and marks Codex responses with `render_mode=codex_markdown`.
-- `pkg/sender/text_sender.go` currently performs codex markdown translation, markdown-aware splitting, ordering marker injection, interactive send, and text fallback.
+- `pkg/sender/text_sender.go` currently performs delivery concerns: render-mode selection, plain-text chunking, reply-in-thread sends, and per-chunk interactive fallback.
+- `pkg/feishumarkdown/prepare.go`, `pkg/feishumarkdown/translator.go`, and `pkg/feishumarkdown/splitter.go` now own Codex-markdown translation, markdown-aware splitting, and ordered chunk preparation.
 
-Codex markdown translation behavior is implemented in `pkg/sender/markdown_translator.go`, while markdown chunk splitting behavior is implemented in `pkg/sender/text_sender.go`. Tests for this behavior are currently split across `pkg/sender/markdown_translator_test.go` and `pkg/sender/text_sender_test.go`.
+Behavior-focused compatibility tests now live primarily under `pkg/feishumarkdown/*_test.go`, while `pkg/sender/text_sender_test.go` focuses on sender-specific delivery responsibilities.
 
 Canonical runtime behavior for Feishu command flow and sender formatting is documented in `docs/specs/2026-03-17-feishu-mcp-command-format.md` and must remain authoritative.
 
@@ -235,6 +243,24 @@ Milestone 4 evidence captured during execution:
     ok      github.com/D3Hunter/frieren-clone/pkg/sender           (cached)
     ok      github.com/D3Hunter/frieren-clone/pkg/service          (cached)
 
+Milestone 5 evidence captured during execution:
+
+    go test ./pkg/sender
+    # github.com/D3Hunter/frieren-clone/pkg/sender [github.com/D3Hunter/frieren-clone/pkg/sender.test]
+    pkg/sender/text_sender_test.go:9:2: "unicode/utf8" imported and not used
+    FAIL    github.com/D3Hunter/frieren-clone/pkg/sender [build failed]
+
+    go test ./pkg/feishumarkdown
+    ok      github.com/D3Hunter/frieren-clone/pkg/feishumarkdown   0.522s
+
+    go test ./pkg/sender
+    ok      github.com/D3Hunter/frieren-clone/pkg/sender           1.143s
+
+    go test ./pkg/feishumarkdown ./pkg/sender ./pkg/service
+    ok      github.com/D3Hunter/frieren-clone/pkg/feishumarkdown   (cached)
+    ok      github.com/D3Hunter/frieren-clone/pkg/sender           0.531s
+    ok      github.com/D3Hunter/frieren-clone/pkg/service          (cached)
+
 ## Validation and Acceptance
 
 The implementation is accepted when all conditions are true:
@@ -314,6 +340,7 @@ Compatibility policy:
 
 Revision note (2026-03-20 16:42 CST): Updated the living sections after Milestone 2 implementation to record the translator extraction, the temporary sender wrapper decision, and the red-green verification evidence.
 Revision note (2026-03-20 17:36 CST): Updated the living sections after Milestone 4 implementation to record the sender integration, the new sender test seam, the explicit markdown-cap decision, and the red-green verification evidence.
+Revision note (2026-03-20 18:24 CST): Updated the living sections after Milestone 5 implementation to record the test rebalance, the sender-wrapper removal, the suffix-budget discovery, and the verification evidence.
 
 ---
 
