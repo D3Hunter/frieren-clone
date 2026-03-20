@@ -21,6 +21,8 @@ const (
 	renderModeCodexMarkdown = "codex_markdown"
 )
 
+var prepareCodexMarkdown = feishumarkdown.PrepareCodexMarkdown
+
 type messageAPI interface {
 	// Create sends a new chat message using Feishu's create-message API.
 	Create(ctx context.Context, req *larkim.CreateMessageReq, opts ...larkcore.RequestOptionFunc) (*larkim.CreateMessageResp, error)
@@ -84,27 +86,17 @@ func (s *TextSender) Send(ctx context.Context, req SendRequest) (SendReceipt, er
 	}
 
 	renderMode := normalizeRenderMode(req.RenderMode)
-	if renderMode == renderModeCodexMarkdown {
-		translated, err := translateCodexMarkdownToFeishu(text)
-		if err != nil {
-			return SendReceipt{}, fmt.Errorf("translate markdown for feishu: %w", err)
-		}
-		text = translated
-	}
-
 	chunks := splitChunks(text, s.maxChunkRunes)
 	if renderMode == renderModeCodexMarkdown {
-		markdownChunkRunes := s.maxChunkRunes
-		// Feishu interactive markdown can fail on larger chunk payloads even when plain text would pass.
-		// Use a safer markdown-specific cap to avoid fallback-to-plain and preserve rendering consistency.
-		if markdownChunkRunes > defaultMaxMarkdownChunkRunes {
-			markdownChunkRunes = defaultMaxMarkdownChunkRunes
+		preparedChunks, err := s.prepareCodexChunks(text)
+		if err != nil {
+			return SendReceipt{}, err
 		}
-		chunks = splitMarkdownChunks(text, markdownChunkRunes)
+		chunks = preparedChunks
 	}
-	if len(chunks) > 1 {
+	if renderMode != renderModeCodexMarkdown && len(chunks) > 1 {
 		for i, chunk := range chunks {
-			chunks[i] = withChunkPrefix(chunk, i, len(chunks), renderMode)
+			chunks[i] = withPlainTextChunkPrefix(chunk, i, len(chunks))
 		}
 	}
 
@@ -120,6 +112,26 @@ func (s *TextSender) Send(ctx context.Context, req SendRequest) (SendReceipt, er
 	}
 
 	return SendReceipt{ThreadID: lastThreadID}, nil
+}
+
+func (s *TextSender) prepareCodexChunks(text string) ([]string, error) {
+	markdownChunkRunes := s.maxChunkRunes
+	// Feishu interactive markdown can fail on larger chunk payloads even when plain text would pass.
+	// Keep the sender-side cap so codex markdown still matches the pre-library delivery budget.
+	if markdownChunkRunes > defaultMaxMarkdownChunkRunes {
+		markdownChunkRunes = defaultMaxMarkdownChunkRunes
+	}
+
+	prepared, err := prepareCodexMarkdown(text, feishumarkdown.PrepareOptions{MaxChunkRunes: markdownChunkRunes})
+	if err != nil {
+		return nil, fmt.Errorf("prepare markdown for feishu: %w", err)
+	}
+
+	chunks := make([]string, 0, len(prepared.Chunks))
+	for _, chunk := range prepared.Chunks {
+		chunks = append(chunks, chunk.Content)
+	}
+	return chunks, nil
 }
 
 func (s *TextSender) sendChunk(ctx context.Context, chatID, replyToMessageID, text, renderMode string) (string, error) {
@@ -286,12 +298,7 @@ func normalizeRenderMode(mode string) string {
 	return renderModePlainText
 }
 
-func withChunkPrefix(chunk string, index, total int, renderMode string) string {
-	if normalizeRenderMode(renderMode) == renderModeCodexMarkdown {
-		// Feishu markdown headings can be degraded when a plain-text ordering label precedes the block.
-		// Keep markdown syntax at the top of each chunk and append the ordering marker as a suffix.
-		return fmt.Sprintf("%s\n\n[%d/%d]", strings.TrimRight(chunk, "\n"), index+1, total)
-	}
+func withPlainTextChunkPrefix(chunk string, index, total int) string {
 	return fmt.Sprintf("[%d/%d] %s", index+1, total, chunk)
 }
 
@@ -336,8 +343,4 @@ func chooseChunkCut(runes []rune, maxRunes int) int {
 
 	// Last resort for overlong single tokens (for example very long URLs).
 	return maxRunes
-}
-
-func splitMarkdownChunks(input string, maxRunes int) []string {
-	return feishumarkdown.SplitTranslatedMarkdown(input, maxRunes)
 }
