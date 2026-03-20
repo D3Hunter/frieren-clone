@@ -45,6 +45,44 @@ func TestTranslateCodexMarkdownToFeishu_PreservesCoreMarkdownStructures(t *testi
 	}
 }
 
+func TestTranslateCodexMarkdownToFeishu_DowngradesH1ToH2ForFeishuCompatibility(t *testing.T) {
+	output, err := TranslateCodexMarkdownToFeishu("# Top Title")
+	if err != nil {
+		t.Fatalf("TranslateCodexMarkdownToFeishu error: %v", err)
+	}
+	if regexp.MustCompile(`(?m)^# Top Title$`).MatchString(output) {
+		t.Fatalf("expected h1 to be downgraded for feishu compatibility, got %q", output)
+	}
+	if !strings.Contains(output, "## Top Title") {
+		t.Fatalf("expected downgraded h2 heading, got %q", output)
+	}
+}
+
+func TestTranslateCodexMarkdownToFeishu_DowngradesH5AndH6ForFeishuCompatibility(t *testing.T) {
+	input := strings.Join([]string{
+		"#### H4",
+		"##### H5",
+		"###### H6",
+	}, "\n")
+
+	output, err := TranslateCodexMarkdownToFeishu(input)
+	if err != nil {
+		t.Fatalf("TranslateCodexMarkdownToFeishu error: %v", err)
+	}
+	if !strings.Contains(output, "#### H4") {
+		t.Fatalf("expected h4 heading preserved, got %q", output)
+	}
+	if strings.Contains(output, "##### H5") || strings.Contains(output, "###### H6") {
+		t.Fatalf("expected h5/h6 headings downgraded for feishu compatibility, got %q", output)
+	}
+	if !strings.Contains(output, "#### H5") {
+		t.Fatalf("expected h5 downgraded to h4, got %q", output)
+	}
+	if !strings.Contains(output, "#### H6") {
+		t.Fatalf("expected h6 downgraded to h4, got %q", output)
+	}
+}
+
 func TestTranslateCodexMarkdownToFeishu_DegradesLocalLinksAndImagesForCompatibility(t *testing.T) {
 	input := strings.Join([]string{
 		"[Local](/Users/jujiajia/code/frieren-clone/pkg/service/message_service.go)",
@@ -227,6 +265,151 @@ func TestTranslateCodexMarkdownToFeishu_KeepsSmallMarkdownFenceAsCode(t *testing
 	}
 	if !strings.Contains(output, "```markdown") {
 		t.Fatalf("expected small markdown fence to remain code block, got %q", output)
+	}
+}
+
+func TestTranslateCodexMarkdownToFeishu_UnwrapsMarkdownFenceWithNestedCodeAndPreservesFollowingBlocks(t *testing.T) {
+	input := strings.Join([]string{
+		"```markdown",
+		"# Sample Markdown Output",
+		"",
+		"### Code Block",
+		"```sql",
+		"SELECT tidb_version();",
+		"```",
+		"",
+		"### Table",
+		"| Item | Status |",
+		"| --- | --- |",
+		"| Parser | ✅ |",
+		"",
+		"### Task List",
+		"- [x] Create sample",
+		"- [ ] Add more cases",
+		"```",
+		"",
+		"Thread info:",
+		"context_window: 17K / 258K tokens used (93% left)",
+		"codex_thread_id: tid_123",
+	}, "\n")
+
+	output, err := TranslateCodexMarkdownToFeishu(input)
+	if err != nil {
+		t.Fatalf("TranslateCodexMarkdownToFeishu error: %v", err)
+	}
+	if strings.Contains(output, "```markdown") {
+		t.Fatalf("expected top-level markdown fence removed, got %q", output)
+	}
+	if strings.Contains(output, "```\n\nThread info:") {
+		t.Fatalf("expected no leaked wrapper fence before thread footer, got %q", output)
+	}
+	if !strings.Contains(output, "```sql\nSELECT tidb_version();\n```") {
+		t.Fatalf("expected sql code block preserved as standalone block, got %q", output)
+	}
+	if !strings.Contains(output, "| Item | Status |") || !strings.Contains(output, "| Parser | ✅ |") {
+		t.Fatalf("expected table block preserved after code block, got %q", output)
+	}
+	if !strings.Contains(output, "- [x] Create sample") || !strings.Contains(output, "- [ ] Add more cases") {
+		t.Fatalf("expected task list markers preserved after table, got %q", output)
+	}
+	if !strings.Contains(output, "Thread info:\ncontext_window: 17K / 258K tokens used (93% left)\ncodex_thread_id: tid_123") {
+		t.Fatalf("expected thread footer preserved after markdown blocks, got %q", output)
+	}
+}
+
+func TestTranslateCodexMarkdownToFeishu_UnwrapsQuadrupleMarkdownFence(t *testing.T) {
+	input := strings.Join([]string{
+		"````markdown",
+		"# Markdown Playground 2",
+		"",
+		"## Text Styles",
+		"Use **bold** and `inline code`.",
+		"",
+		"```json",
+		"{",
+		`  "ok": true`,
+		"}",
+		"```",
+		"````",
+		"",
+		"### Thread info",
+		"- codex_thread_id: `tid_123`",
+	}, "\n")
+
+	output, err := TranslateCodexMarkdownToFeishu(input)
+	if err != nil {
+		t.Fatalf("TranslateCodexMarkdownToFeishu error: %v", err)
+	}
+	if strings.Contains(output, "````markdown") {
+		t.Fatalf("expected outer quadruple markdown fence removed, got %q", output)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(output), "## Markdown Playground 2") {
+		t.Fatalf("expected heading at top of translated markdown, got %q", output)
+	}
+}
+
+func TestTranslateCodexMarkdownToFeishu_KeepsPlaygroundHeadingForComplexPayload(t *testing.T) {
+	input := strings.Join([]string{
+		"````markdown",
+		"# Markdown Playground 2",
+		"",
+		"## Text Styles",
+		"This has **bold**, *italic*, ***bold+italic***, ~~strikethrough~~, and `inline code`.",
+		"",
+		"---",
+		"",
+		"## Links",
+		"- Inline link: [TiDB repo](https://github.com/pingcap/tidb)",
+		"- Auto-link: <https://example.com>",
+		"- Footnote reference[^demo]",
+		"",
+		"## Task List",
+		"- [x] Sample created",
+		"- [ ] Add more cases",
+		"",
+		"## Collapsible Section",
+		"<details>",
+		"<summary>Expand me</summary>",
+		"",
+		"Inside the fold you can include text, lists, and code.",
+		"",
+		"```json",
+		"{",
+		`  "kind": "markdown-demo",`,
+		`  "ok": true`,
+		"}",
+		"```",
+		"</details>",
+		"",
+		"## Table",
+		"| Item | Align Left | Align Center | Align Right |",
+		"|:-----|:-----------|:------------:|------------:|",
+		"| A    | yes        | yes          | yes         |",
+		"| B    | demo       | demo         | 123         |",
+		"",
+		"## Image",
+		"![Placeholder image](https://picsum.photos/360/120)",
+		"",
+		"[^demo]: Footnotes are supported in many Markdown renderers.",
+		"````",
+		"",
+		"### Thread info",
+		"- context_window: 17K / 258K tokens used (93% left)",
+		"- codex_thread_id: `tid_123`",
+	}, "\n")
+
+	output, err := TranslateCodexMarkdownToFeishu(input)
+	if err != nil {
+		t.Fatalf("TranslateCodexMarkdownToFeishu error: %v", err)
+	}
+	if strings.Contains(output, "````markdown") {
+		t.Fatalf("expected quadruple markdown wrapper removed, got %q", output)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(output), "## Markdown Playground 2") {
+		t.Fatalf("expected top heading to remain a markdown heading, got %q", output)
+	}
+	if !strings.Contains(output, "### Thread info") {
+		t.Fatalf("expected thread info section preserved, got %q", output)
 	}
 }
 

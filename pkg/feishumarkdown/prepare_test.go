@@ -1,7 +1,9 @@
 package feishumarkdown
 
 import (
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestNormalizePrepareOptions_DefaultsChunkLimit(t *testing.T) {
@@ -57,5 +59,26 @@ func TestPrepareCodexMarkdown_TranslatesMarkdownForFeishu(t *testing.T) {
 
 	if got.Translated != "## Title" {
 		t.Fatalf("expected translated heading output, got %q", got.Translated)
+	}
+}
+
+func TestPrepareCodexMarkdown_DefaultChunkBudgetKeepsPreparedChunksWithinInteractiveSafetyLimit(t *testing.T) {
+	const safeInteractiveMarkdownLimit = 1400
+
+	input := "## Markdown Playground (2K+ Characters)\n\n" +
+		strings.Repeat("Markdown rendering should remain readable even with long-form text. ", 90)
+
+	got, err := PrepareCodexMarkdown(input, PrepareOptions{})
+	if err != nil {
+		t.Fatalf("PrepareCodexMarkdown error: %v", err)
+	}
+	if len(got.Chunks) < 2 {
+		t.Fatalf("expected long markdown to split into multiple chunks, got %d", len(got.Chunks))
+	}
+
+	for i, chunk := range got.Chunks {
+		if gotRunes := utf8.RuneCountInString(chunk.Content); gotRunes > safeInteractiveMarkdownLimit {
+			t.Fatalf("chunk %d exceeds safe interactive markdown size: %d > %d; chunk=%q", i, gotRunes, safeInteractiveMarkdownLimit, chunk.Content)
+		}
 	}
 }
