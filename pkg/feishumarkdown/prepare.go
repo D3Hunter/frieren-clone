@@ -37,16 +37,28 @@ func PrepareCodexMarkdown(input string, opts PrepareOptions) (PreparedOutput, er
 		return PreparedOutput{}, err
 	}
 
+	rawChunks := splitMarkdownChunks(translated, opts.MaxChunkRunes)
+	chunks := make([]Chunk, 0, len(rawChunks))
+	for i, chunk := range rawChunks {
+		if len(rawChunks) > 1 {
+			chunk = withChunkSuffix(chunk, i, len(rawChunks))
+		}
+		chunks = append(chunks, Chunk{
+			Index:   i + 1,
+			Total:   len(rawChunks),
+			Content: chunk,
+		})
+	}
+
 	return PreparedOutput{
 		Translated: translated,
-		Chunks:     make([]Chunk, 0),
+		Chunks:     chunks,
 	}, nil
 }
 
 func normalizePrepareOptions(opts PrepareOptions) PrepareOptions {
 	if opts.MaxChunkRunes <= 0 {
-		// Milestone 1 keeps the package surface stable by normalizing the
-		// default chunk budget even though chunking is not implemented yet.
+		// Callers can omit the chunk cap and still get the sender-compatible default budget.
 		opts.MaxChunkRunes = DefaultMaxChunkRunes
 	}
 	return opts
