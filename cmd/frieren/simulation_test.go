@@ -62,3 +62,29 @@ func TestIsSimulationFailureReply(t *testing.T) {
 		t.Fatalf("expected normal response not treated as failure")
 	}
 }
+
+func TestHasUnrenderedArtifacts_DetectsUnsupportedHeadingLevels(t *testing.T) {
+	if !hasUnrenderedArtifacts("##### H5 Heading") {
+		t.Fatalf("expected h5 heading to be treated as unrendered risk")
+	}
+	if !hasUnrenderedArtifacts("###### H6 Heading") {
+		t.Fatalf("expected h6 heading to be treated as unrendered risk")
+	}
+	if hasUnrenderedArtifacts("#### H4 Heading") {
+		t.Fatalf("expected h4 heading to remain allowed")
+	}
+}
+
+func TestHasUnrenderedArtifacts_IgnoresInlineTripleBackticks(t *testing.T) {
+	input := "Inline sample with triple ticks in one token: abc```def"
+	if hasUnrenderedArtifacts(input) {
+		t.Fatalf("expected inline triple-backtick token not treated as unmatched fenced block")
+	}
+}
+
+func TestHasUnrenderedArtifacts_IgnoresUnsupportedHeadingInsideFencedBlock(t *testing.T) {
+	input := "```md\n##### Level 5\n###### Level 6\n```"
+	if hasUnrenderedArtifacts(input) {
+		t.Fatalf("expected unsupported heading markers inside fenced code block to be ignored")
+	}
+}

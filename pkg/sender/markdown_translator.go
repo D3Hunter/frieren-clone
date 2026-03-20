@@ -134,8 +134,10 @@ func (r markdownASTRenderer) renderBlock(node gast.Node, listDepth int) string {
 		if level < 2 {
 			level = 2
 		}
-		if level > 6 {
-			level = 6
+		// Observed in Feishu interactive markdown: h5/h6 often render like plain text or disappear.
+		// Clamp deep headings to h4 so section titles remain visually distinguishable.
+		if level > 4 {
+			level = 4
 		}
 		return strings.Repeat("#", level) + " " + strings.TrimSpace(r.renderInlineChildren(typed))
 	case *gast.Paragraph:
@@ -432,7 +434,9 @@ func renderNodeInlineText(parent gast.Node, source []byte) string {
 				alt = "image"
 			}
 			if isHTTPLink(destination) {
-				builder.WriteString("![" + alt + "](" + destination + ")")
+				// Feishu interactive markdown can fail to render cards that contain markdown image syntax.
+				// Convert images into normal links so users can still open the resource reliably.
+				builder.WriteString("[" + alt + "](" + destination + ")")
 				continue
 			}
 			builder.WriteString(alt + " (" + renderInlineCode(destination) + ")")
