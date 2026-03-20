@@ -20,8 +20,8 @@ The immediate user-visible result is not a new bot command. The result is a reus
 - [x] (2026-03-20 17:30 CST) Milestone 3 complete: moved markdown-aware splitter runtime into `pkg/feishumarkdown/splitter.go`, made `PrepareCodexMarkdown` compose translation + splitting + markdown suffix ordering markers, kept sender behavior unchanged via a thin splitter wrapper, and moved milestone-critical splitter parity coverage into package-level tests; verified with a red-green cycle using `go test ./pkg/feishumarkdown` (initially failed with `undefined: splitMarkdownChunks`) and `go test ./pkg/feishumarkdown ./pkg/sender` after extraction.
 - [x] (2026-03-20 17:36 CST) Milestone 4 complete: refactored `pkg/sender/text_sender.go` to call `feishumarkdown.PrepareCodexMarkdown` for codex markdown mode, kept plain-text chunking untouched, preserved per-chunk interactive-then-text fallback semantics, removed sender-local markdown translation/splitting flow from runtime, and verified with a red-green cycle using `go test ./pkg/sender` (initially failed with `undefined: prepareCodexMarkdown`) followed by `go test ./pkg/feishumarkdown ./pkg/sender ./pkg/service`; milestone diff size: `git diff --shortstat` => `3 files changed, 196 insertions(+), 29 deletions(-)`.
 - [x] (2026-03-20 18:24 CST) Milestone 5 complete: moved remaining translator-compatibility assertions and default interactive-safety chunk coverage into `pkg/feishumarkdown`, trimmed sender tests back to delivery responsibilities, removed `pkg/sender/markdown_translator.go` plus its redundant parser-focused test file, and verified with `go test ./pkg/feishumarkdown`, `go test ./pkg/sender`, and `go test ./pkg/feishumarkdown ./pkg/sender ./pkg/service`; milestone diff size: `git diff --stat -- pkg/feishumarkdown pkg/sender` => `5 files changed, 206 insertions(+), 755 deletions(-)`.
-- [x] (2026-03-20 18:52 CST) Milestone 6 complete: created `docs/specs/2026-03-20-feishu-markdown-library-usage.md` and `docs/specs/2026-03-20-feishu-markdown-library-agent-prompt.md`, and updated `README.md` with a concise quickstart plus links to both docs.
-- [ ] Milestone 7: Run full verification and record evidence.
+- [x] (2026-03-20 17:58 CST) Milestone 6 complete: created `docs/specs/2026-03-20-feishu-markdown-library-usage.md` and `docs/specs/2026-03-20-feishu-markdown-library-agent-prompt.md`, and updated `README.md` with a concise quickstart plus links to both docs.
+- [x] (2026-03-20 18:00 CST) Milestone 7 complete: ran the targeted package suite and the full repository suite, then recorded the pass results in this plan.
 
 ## Surprises & Discoveries
 
@@ -54,6 +54,9 @@ The immediate user-visible result is not a new bot command. The result is a reus
 
 - Observation: Prepared markdown chunks can grow slightly beyond a caller-supplied split budget because `[i/n]` ordering suffixes are appended after splitting.
   Evidence: A targeted check against `PrepareCodexMarkdown(..., PrepareOptions{MaxChunkRunes: 1400})` produced chunks of `1402` runes, while the default `1380` budget stayed under the sender's historical `1400` interactive-safety ceiling.
+
+- Observation: Final verification completed cleanly with no new failures or behavioral deviations.
+  Evidence: `go test ./pkg/feishumarkdown ./pkg/sender ./pkg/service` and `go test ./...` both passed in the final milestone run.
 
 ## Decision Log
 
@@ -103,9 +106,9 @@ The immediate user-visible result is not a new bot command. The result is a reus
 
 ## Outcomes & Retrospective
 
-Milestone 1 shipped the reusable package shell and one-call API contract in `pkg/feishumarkdown` without changing runtime sender behavior. Milestone 2 moved the markdown translation runtime into that package, added package-level translator parity coverage, and kept sender behavior stable via a thin wrapper. Milestone 3 moved markdown-aware splitting into `pkg/feishumarkdown`, made `PrepareCodexMarkdown` return sender-compatible ordered chunks, and kept sender runtime behavior stable by delegating only the splitter helper. Milestone 4 finishes the first real consumer migration by switching `pkg/sender/text_sender.go` to the library pipeline, leaving plain-text handling untouched and preserving the per-chunk interactive fallback path. Milestone 5 rebalanced the tests around that boundary: compatibility rules now primarily live under `pkg/feishumarkdown`, sender tests focus on delivery semantics, and the obsolete sender-local translator wrapper has been removed.
+Milestone 1 shipped the reusable package shell and one-call API contract in `pkg/feishumarkdown` without changing runtime sender behavior. Milestone 2 moved the markdown translation runtime into that package, added package-level translator parity coverage, and kept sender behavior stable via a thin wrapper. Milestone 3 moved markdown-aware splitting into `pkg/feishumarkdown`, made `PrepareCodexMarkdown` return sender-compatible ordered chunks, and kept sender runtime behavior stable by delegating only the splitter helper. Milestone 4 finished the first real consumer migration by switching `pkg/sender/text_sender.go` to the library pipeline, leaving plain-text handling untouched and preserving the per-chunk interactive fallback path. Milestone 5 rebalanced the tests around that boundary: compatibility rules now primarily live under `pkg/feishumarkdown`, sender tests focus on delivery semantics, and the obsolete sender-local translator wrapper has been removed. Milestone 6 added the usage and handoff documentation under `docs/specs` and linked it from `README.md`. Milestone 7 completed final verification and evidence capture.
 
-Remaining work is full-suite verification and final evidence capture in Milestone 7. No compatibility drift has been introduced in the targeted sender/library path so far; `go test ./pkg/feishumarkdown ./pkg/sender ./pkg/service` passes after the Milestone 5 test rebalance, and Milestone 6 documentation artifacts are now in place under `docs/specs`.
+Final verification is green: `go test ./pkg/feishumarkdown ./pkg/sender ./pkg/service` passed, and `go test ./...` passed across the repository. No behavioral regressions or new surprises were observed during the closing verification run.
 
 ## Context and Orientation
 
@@ -341,6 +344,7 @@ Compatibility policy:
 Revision note (2026-03-20 16:42 CST): Updated the living sections after Milestone 2 implementation to record the translator extraction, the temporary sender wrapper decision, and the red-green verification evidence.
 Revision note (2026-03-20 17:36 CST): Updated the living sections after Milestone 4 implementation to record the sender integration, the new sender test seam, the explicit markdown-cap decision, and the red-green verification evidence.
 Revision note (2026-03-20 18:24 CST): Updated the living sections after Milestone 5 implementation to record the test rebalance, the sender-wrapper removal, the suffix-budget discovery, and the verification evidence.
+Revision note (2026-03-20 18:00 CST): Completed final verification (`go test ./pkg/feishumarkdown ./pkg/sender ./pkg/service` and `go test ./...`) and marked the ExecPlan terminal state.
 
 ---
 
