@@ -27,7 +27,7 @@ const (
 
 	defaultSimulationRounds = 1
 
-	simulationPrompt = "/tidb give me a markdown example that you can output, include all support markdown elements in your output format, just to test. also give the level values for title\nbe longer than 2k"
+	simulationPrompt = "/tidb give me a markdown example that you can output, include all support markdown elements in your output format, just to test. also give the level values for title. be longer than 2k"
 )
 
 var unsupportedFeishuHeadingPattern = regexp.MustCompile(`(?m)^\s*#{5,6}\s+\S+`)
