@@ -119,6 +119,7 @@ var mentionTagPattern = regexp.MustCompile(`(?s)<at\b[^>]*>.*?</at>`)
 var projectCommandPattern = regexp.MustCompile(`(?s)^/([a-zA-Z0-9_-]+)\s+(.+)$`)
 var codexThreadIDPattern = regexp.MustCompile(`(?i)"thread(?:_|)id"\s*:\s*"([^"]+)"`)
 var tokenUsagePattern = regexp.MustCompile(`(?i)([0-9][0-9,._]*)\s*/\s*([0-9][0-9,._]*)\s*(?:tokens?)`)
+var mcpEndpointPattern = regexp.MustCompile(`https?://[^\s"]+`)
 
 const (
 	processingStartReactionType = "OnIt"
@@ -661,7 +662,7 @@ func (s *CommandService) replyCommandFailure(ctx context.Context, msg IncomingMe
 		text = "Execution failed"
 	}
 	if cause != nil {
-		text = fmt.Sprintf("%s: %v", text, cause)
+		text = fmt.Sprintf("%s: %s", text, summarizeFailureCause(cause))
 		msgLogger.Error("command execution failed", zap.String("failure_message", text), zap.Error(cause))
 	} else {
 		msgLogger.Error("command execution failed", zap.String("failure_message", text))
@@ -672,6 +673,47 @@ func (s *CommandService) replyCommandFailure(ctx context.Context, msg IncomingMe
 		return err
 	}
 	return nil
+}
+
+func summarizeFailureCause(cause error) string {
+	if cause == nil {
+		return ""
+	}
+	if isMCPConnectionUnavailableError(cause) {
+		if endpoint := extractMCPFailureEndpoint(cause.Error()); endpoint != "" {
+			return fmt.Sprintf("MCP endpoint is unavailable at %s. Start or restart the MCP server, then retry.", endpoint)
+		}
+		return "MCP endpoint is unavailable. Start or restart the MCP server, then retry."
+	}
+	return strings.TrimSpace(cause.Error())
+}
+
+func isMCPConnectionUnavailableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lowered := strings.ToLower(err.Error())
+	if strings.Contains(lowered, "connection refused") {
+		return true
+	}
+	if strings.Contains(lowered, "connect mcp endpoint") {
+		return true
+	}
+	// Special-case closed MCP stream sessions so users see a concise recovery hint
+	// instead of the full SDK reconnect stack trace.
+	return strings.Contains(lowered, "failed to reconnect") ||
+		strings.Contains(lowered, "client is closing")
+}
+
+func extractMCPFailureEndpoint(raw string) string {
+	matches := mcpEndpointPattern.FindAllString(raw, -1)
+	for _, candidate := range matches {
+		normalized := strings.TrimSpace(candidate)
+		if strings.HasSuffix(strings.ToLower(normalized), "/mcp") {
+			return normalized
+		}
+	}
+	return ""
 }
 
 func isGroupChat(chatType string) bool {
