@@ -1173,6 +1173,48 @@ func TestHandleIncomingMessage_DependencyErrorsReplyToUserWithoutPropagation(t *
 	}
 }
 
+func TestHandleIncomingMessage_MCPConnectionFailureIsSummarized(t *testing.T) {
+	sender := &fakeMessageSender{}
+	svc := NewCommandService(CommandServiceDeps{
+		MCP: &fakeMCPGateway{
+			callErr: errors.New(`call tool "codex": connection closed: calling "tools/call": client is closing: standalone SSE stream: failed to reconnect (session ID: 6a1c6539-1338-400d-ae6e-89d24dd3f770): connection failed after 5 attempts: Get "http://localhost:8787/mcp": dial tcp [::1]:8787: connect: connection refused`),
+		},
+		Sender:     sender,
+		TopicStore: newFakeTopicStore(),
+		Config: CommandServiceConfig{
+			BotOpenID:       "ou_bot",
+			Heartbeat:       time.Hour,
+			ProjectAliasCWD: map[string]string{"tidb": "/work/tidb"},
+		},
+	})
+
+	err := svc.HandleIncomingMessage(context.Background(), IncomingMessage{
+		ChatID:       "oc_chat",
+		ChatType:     "group",
+		MessageID:    "om_1",
+		RawText:      "<at user_id=\"ou_bot\"></at> /tidb explain dxf",
+		MentionedIDs: []string{"ou_bot"},
+	})
+	if err != nil {
+		t.Fatalf("HandleIncomingMessage error: %v", err)
+	}
+	if len(sender.messages) != 1 {
+		t.Fatalf("expected one failure message, got %d", len(sender.messages))
+	}
+	if !strings.Contains(sender.messages[0].Text, "MCP endpoint is unavailable") {
+		t.Fatalf("expected summarized endpoint failure, got %q", sender.messages[0].Text)
+	}
+	if !strings.Contains(sender.messages[0].Text, "http://localhost:8787/mcp") {
+		t.Fatalf("expected endpoint location in failure message, got %q", sender.messages[0].Text)
+	}
+	if strings.Contains(sender.messages[0].Text, "failed to reconnect") {
+		t.Fatalf("expected raw reconnect details hidden from user message, got %q", sender.messages[0].Text)
+	}
+	if !strings.Contains(sender.messages[0].Text, "Diagnostic ID") {
+		t.Fatalf("expected diagnostic id in execution failure message, got %q", sender.messages[0].Text)
+	}
+}
+
 func TestHandleIncomingMessage_UsesConfiguredStartReaction(t *testing.T) {
 	sender := &fakeMessageSender{}
 	svc := NewCommandService(CommandServiceDeps{

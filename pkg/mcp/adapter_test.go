@@ -271,3 +271,44 @@ func TestGateway_CallTool_CodexReplyIgnoresGatewayTimeout(t *testing.T) {
 		t.Fatalf("CallTool codex-reply should not be bounded by gateway timeout, got error: %v", err)
 	}
 }
+
+func TestGateway_CallTool_ReconnectsWhenCachedSessionIsClosed(t *testing.T) {
+	server := sdk.NewServer(&sdk.Implementation{Name: "test-server", Version: "1.0.0"}, nil)
+	sdk.AddTool(server, &sdk.Tool{Name: "echo", Description: "echo text"}, func(ctx context.Context, req *sdk.CallToolRequest, in struct {
+		Text string `json:"text"`
+	}) (*sdk.CallToolResult, map[string]any, error) {
+		return &sdk.CallToolResult{
+			Content: []sdk.Content{&sdk.TextContent{Text: "echo: " + strings.TrimSpace(in.Text)}},
+		}, nil, nil
+	})
+
+	httpServer := httptest.NewServer(sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server {
+		return server
+	}, nil))
+	defer httpServer.Close()
+
+	gateway := NewGateway(httpServer.URL, 3*time.Second)
+	defer func() {
+		if err := gateway.Close(); err != nil {
+			t.Fatalf("Close error: %v", err)
+		}
+	}()
+
+	if _, err := gateway.CallTool(context.Background(), "echo", map[string]any{"text": "first"}); err != nil {
+		t.Fatalf("first CallTool error: %v", err)
+	}
+	if gateway.session == nil {
+		t.Fatal("expected cached session after first call")
+	}
+	if err := gateway.session.Close(); err != nil {
+		t.Fatalf("close cached session: %v", err)
+	}
+
+	result, err := gateway.CallTool(context.Background(), "echo", map[string]any{"text": "second"})
+	if err != nil {
+		t.Fatalf("second CallTool should reconnect with a fresh session, got error: %v", err)
+	}
+	if !strings.Contains(result, "echo: second") {
+		t.Fatalf("unexpected second CallTool result: %q", result)
+	}
+}

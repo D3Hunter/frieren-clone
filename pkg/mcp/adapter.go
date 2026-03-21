@@ -159,11 +159,32 @@ func (g *Gateway) withSessionWithTimeout(ctx context.Context, timeout time.Durat
 	if err != nil {
 		return err
 	}
-	g.sessionLastUsedAt = time.Now()
-	if err := fn(callCtx, session); err != nil {
-		return err
+	runWithSession := func(activeSession *sdk.ClientSession) error {
+		g.sessionLastUsedAt = time.Now()
+		if err := fn(callCtx, activeSession); err != nil {
+			return err
+		}
+		g.sessionLastUsedAt = time.Now()
+		return nil
 	}
-	g.sessionLastUsedAt = time.Now()
+	if err := runWithSession(session); err != nil {
+		if !isSessionConnectionClosedError(err) {
+			return err
+		}
+		// When the underlying stream transport is gone (server restart/shutdown), the cached
+		// SDK session can stay in a closing state and every later call will fail immediately.
+		// Drop it and retry once with a freshly connected session.
+		if closeErr := g.closeSessionLocked(); closeErr != nil {
+			return fmt.Errorf("reset mcp session after connection closure: %w", closeErr)
+		}
+		reconnectedSession, reconnectErr := g.ensureSessionLocked(callCtx)
+		if reconnectErr != nil {
+			return reconnectErr
+		}
+		if retryErr := runWithSession(reconnectedSession); retryErr != nil {
+			return retryErr
+		}
+	}
 	return nil
 }
 
@@ -221,6 +242,16 @@ func (g *Gateway) timeoutForTool(tool string) time.Duration {
 func isCodexExecutionTool(tool string) bool {
 	tool = strings.ToLower(strings.TrimSpace(tool))
 	return tool == "codex" || tool == "codex-reply"
+}
+
+func isSessionConnectionClosedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lowered := strings.ToLower(err.Error())
+	return strings.Contains(lowered, "client is closing") ||
+		strings.Contains(lowered, "failed to reconnect") ||
+		(strings.Contains(lowered, "connection closed") && strings.Contains(lowered, "tools/call"))
 }
 
 func renderCallToolResult(result *sdk.CallToolResult) string {
