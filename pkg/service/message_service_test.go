@@ -104,6 +104,26 @@ func TestFormatContextWindowUsage(t *testing.T) {
 	}
 }
 
+func TestCodexStatusOutputPreview(t *testing.T) {
+	t.Run("keeps short output", func(t *testing.T) {
+		got := codexStatusOutputPreview("  status=completed  ")
+		if got != "status=completed" {
+			t.Fatalf("unexpected short preview: %q", got)
+		}
+	})
+
+	t.Run("truncates long output", func(t *testing.T) {
+		input := strings.Repeat("x", codexStatusOutputPreviewLimit+17)
+		got := codexStatusOutputPreview(input)
+		if !strings.HasPrefix(got, strings.Repeat("x", codexStatusOutputPreviewLimit)) {
+			t.Fatalf("expected preview prefix to keep first %d runes, got %q", codexStatusOutputPreviewLimit, got)
+		}
+		if !strings.Contains(got, "(truncated, total_runes=") {
+			t.Fatalf("expected truncated marker in preview, got %q", got)
+		}
+	})
+}
+
 func TestExtractCodexStructuredPayload_WithoutSuffixJSON(t *testing.T) {
 	content, threadID, ok := extractCodexStructuredPayload("plain output without json")
 	if ok {

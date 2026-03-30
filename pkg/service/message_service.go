@@ -122,19 +122,20 @@ var tokenUsagePattern = regexp.MustCompile(`(?i)([0-9][0-9,._]*)\s*/\s*([0-9][0-
 var mcpEndpointPattern = regexp.MustCompile(`https?://[^\s"]+`)
 
 const (
-	processingStartReactionType = "OnIt"
-	codexToolName               = "codex"
-	codexReplyToolName          = "codex-reply"
-	codexStatusToolName         = "codex-status"
-	mcpCodexTopicAlias          = "__mcp_codex__"
-	renderModePlainText         = "plain_text"
-	renderModeCodexMarkdown     = "codex_markdown"
-	defaultHelpMessage          = "Available commands:\n/help\n/mcp tools\n/mcp schema <tool>\n/mcp call <tool> <json>\n/<project> <prompt>\n\nNote: /mcp call codex always starts a new Codex thread."
-	codexPromptHelpMessage      = `Usage: /mcp call codex {"prompt":"<your prompt>"}`
-	defaultCodexModel           = "gpt-5.3-codex"
-	defaultCodexReasoningEffort = "xhigh"
-	defaultCodexSandbox         = "danger-full-access"
-	defaultCodexApprovalPolicy  = "never"
+	processingStartReactionType   = "OnIt"
+	codexToolName                 = "codex"
+	codexReplyToolName            = "codex-reply"
+	codexStatusToolName           = "codex-status"
+	codexStatusOutputPreviewLimit = 2000
+	mcpCodexTopicAlias            = "__mcp_codex__"
+	renderModePlainText           = "plain_text"
+	renderModeCodexMarkdown       = "codex_markdown"
+	defaultHelpMessage            = "Available commands:\n/help\n/mcp tools\n/mcp schema <tool>\n/mcp call <tool> <json>\n/<project> <prompt>\n\nNote: /mcp call codex always starts a new Codex thread."
+	codexPromptHelpMessage        = `Usage: /mcp call codex {"prompt":"<your prompt>"}`
+	defaultCodexModel             = "gpt-5.3-codex"
+	defaultCodexReasoningEffort   = "xhigh"
+	defaultCodexSandbox           = "danger-full-access"
+	defaultCodexApprovalPolicy    = "never"
 	// Intentionally keep /mcp call codex as "start new thread" so users can open
 	// multiple independent Codex threads inside one Feishu topic when needed.
 	codexNewThreadNotice     = "Note: by design, /mcp call codex always starts a new Codex thread and does not reuse the current topic binding."
@@ -813,15 +814,48 @@ func (s *CommandService) resolveCodexContextWindowUsage(ctx context.Context, cod
 		}
 		return ""
 	}
+	if logger != nil {
+		logger.Debug(
+			"received codex-status response",
+			zap.String("codex_thread_id", codexThreadID),
+			zap.Int("codex_status_output_bytes", len(statusOutput)),
+			zap.String("codex_status_output_preview", codexStatusOutputPreview(statusOutput)),
+		)
+	}
 
 	usage, ok := parseCodexContextWindowUsage(statusOutput)
 	if !ok {
 		if logger != nil {
-			logger.Debug("skip codex context window footer because codex-status output is not parseable", zap.String("codex_thread_id", codexThreadID))
+			logger.Debug(
+				"skip codex context window footer because codex-status output is not parseable",
+				zap.String("codex_thread_id", codexThreadID),
+				zap.Int("codex_status_output_bytes", len(statusOutput)),
+				zap.String("codex_status_output_preview", codexStatusOutputPreview(statusOutput)),
+			)
 		}
 		return ""
 	}
+	if logger != nil {
+		logger.Debug(
+			"parsed codex context window usage",
+			zap.String("codex_thread_id", codexThreadID),
+			zap.Int64("used_tokens", usage.UsedTokens),
+			zap.Int64("max_tokens", usage.MaxTokens),
+		)
+	}
 	return formatContextWindowUsage(usage)
+}
+
+func codexStatusOutputPreview(output string) string {
+	trimmed := strings.TrimSpace(output)
+	if trimmed == "" {
+		return ""
+	}
+	runes := []rune(trimmed)
+	if len(runes) <= codexStatusOutputPreviewLimit {
+		return trimmed
+	}
+	return fmt.Sprintf("%s...(truncated, total_runes=%d)", string(runes[:codexStatusOutputPreviewLimit]), len(runes))
 }
 
 func parseCodexContextWindowUsage(output string) (codexContextWindowUsage, bool) {
