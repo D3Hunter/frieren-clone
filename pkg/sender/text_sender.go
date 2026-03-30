@@ -17,7 +17,6 @@ const defaultMaxChunkRunes = 1800
 const defaultMaxMarkdownChunkRunes = 1380
 
 const (
-	renderModePlainText     = "plain_text"
 	renderModeCodexMarkdown = "codex_markdown"
 )
 
@@ -291,11 +290,7 @@ func normalizeMarkdown(text string) string {
 }
 
 func normalizeRenderMode(mode string) string {
-	mode = strings.TrimSpace(strings.ToLower(mode))
-	if mode == renderModeCodexMarkdown {
-		return renderModeCodexMarkdown
-	}
-	return renderModePlainText
+	return renderModeCodexMarkdown
 }
 
 func withPlainTextChunkPrefix(chunk string, index, total int) string {

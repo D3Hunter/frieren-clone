@@ -299,11 +299,20 @@ func TestHandleIncomingMessage_HelpCommand(t *testing.T) {
 	if len(sender.messages) == 0 {
 		t.Fatal("expected help response")
 	}
-	if sender.messages[len(sender.messages)-1].RenderMode != renderModePlainText {
-		t.Fatalf("expected help response plain render mode, got %q", sender.messages[len(sender.messages)-1].RenderMode)
+	if sender.messages[len(sender.messages)-1].RenderMode != renderModeCodexMarkdown {
+		t.Fatalf("expected help response codex markdown mode, got %q", sender.messages[len(sender.messages)-1].RenderMode)
 	}
-	if !strings.Contains(sender.messages[len(sender.messages)-1].Text, "/mcp tools") {
+	if !strings.Contains(sender.messages[len(sender.messages)-1].Text, "### Command guide") {
 		t.Fatalf("unexpected help text: %q", sender.messages[len(sender.messages)-1].Text)
+	}
+	if !strings.Contains(sender.messages[len(sender.messages)-1].Text, "Use one of the commands below") {
+		t.Fatalf("expected human-friendly help preface, got %q", sender.messages[len(sender.messages)-1].Text)
+	}
+	if !strings.Contains(sender.messages[len(sender.messages)-1].Text, "### Available projects") {
+		t.Fatalf("expected help message to include available projects section, got %q", sender.messages[len(sender.messages)-1].Text)
+	}
+	if !strings.Contains(sender.messages[len(sender.messages)-1].Text, "`tidb`") {
+		t.Fatalf("expected help message to include configured project alias, got %q", sender.messages[len(sender.messages)-1].Text)
 	}
 }
 
@@ -718,14 +727,14 @@ func TestHandleIncomingMessage_TopicFollowupSessionTimeoutNotifiesAndStartsNewTh
 	if len(sender.messages) != 2 {
 		t.Fatalf("expected session-reset notice and final response, got %d messages", len(sender.messages))
 	}
-	if sender.messages[0].RenderMode != renderModePlainText {
-		t.Fatalf("expected session reset notice plain mode, got %q", sender.messages[0].RenderMode)
+	if sender.messages[0].RenderMode != renderModeCodexMarkdown {
+		t.Fatalf("expected session reset notice codex markdown mode, got %q", sender.messages[0].RenderMode)
 	}
 	if sender.messages[1].RenderMode != renderModeCodexMarkdown {
 		t.Fatalf("expected final follow-up response codex markdown mode, got %q", sender.messages[1].RenderMode)
 	}
-	if !strings.Contains(sender.messages[0].Text, "expired Codex session") {
-		t.Fatalf("expected first message to mention session expiration, got %q", sender.messages[0].Text)
+	if !strings.Contains(sender.messages[0].Text, "unavailable Codex session") {
+		t.Fatalf("expected first message to mention unavailable session state, got %q", sender.messages[0].Text)
 	}
 	if !strings.Contains(sender.messages[0].Text, "codex_old") {
 		t.Fatalf("expected first message to include previous codex thread id, got %q", sender.messages[0].Text)
@@ -838,8 +847,74 @@ func TestHandleIncomingMessage_MCPCallCodexRequiresPrompt(t *testing.T) {
 	if !strings.Contains(sender.messages[0].Text, "prompt") {
 		t.Fatalf("expected prompt validation in response, got %q", sender.messages[0].Text)
 	}
+	if !strings.Contains(sender.messages[0].Text, "Example:") {
+		t.Fatalf("expected prompt validation to include example usage, got %q", sender.messages[0].Text)
+	}
 	if mcp.calledWith.tool != "" {
 		t.Fatalf("expected no tool call for invalid codex args, got %q", mcp.calledWith.tool)
+	}
+}
+
+func TestHandleIncomingMessage_UnknownProjectAliasReturnsFriendlyGuidance(t *testing.T) {
+	sender := &fakeMessageSender{}
+	svc := NewCommandService(CommandServiceDeps{
+		MCP:        &fakeMCPGateway{},
+		Sender:     sender,
+		TopicStore: newFakeTopicStore(),
+		Config: CommandServiceConfig{
+			BotOpenID:       "ou_bot",
+			Heartbeat:       time.Hour,
+			ProjectAliasCWD: map[string]string{"tidb": "/work/tidb"},
+		},
+	})
+
+	err := svc.HandleIncomingMessage(context.Background(), IncomingMessage{
+		ChatID:       "oc_chat",
+		ChatType:     "group",
+		MessageID:    "om_1",
+		RawText:      `<at user_id="ou_bot"></at> /mysql check status`,
+		MentionedIDs: []string{"ou_bot"},
+	})
+	if err != nil {
+		t.Fatalf("HandleIncomingMessage error: %v", err)
+	}
+	if len(sender.messages) != 1 {
+		t.Fatalf("expected one alias guidance message, got %d", len(sender.messages))
+	}
+	if !strings.Contains(sender.messages[0].Text, "`mysql`") {
+		t.Fatalf("expected unknown alias in guidance message, got %q", sender.messages[0].Text)
+	}
+	if !strings.Contains(sender.messages[0].Text, "/help") {
+		t.Fatalf("expected guidance to point user to /help, got %q", sender.messages[0].Text)
+	}
+}
+
+func TestHandleIncomingMessage_PlainTextWithoutBindingReturnsFriendlyGuidance(t *testing.T) {
+	sender := &fakeMessageSender{}
+	svc := NewCommandService(CommandServiceDeps{
+		MCP:        &fakeMCPGateway{},
+		Sender:     sender,
+		TopicStore: newFakeTopicStore(),
+		Config:     CommandServiceConfig{BotOpenID: "ou_bot", Heartbeat: time.Hour},
+	})
+
+	err := svc.HandleIncomingMessage(context.Background(), IncomingMessage{
+		ChatID:    "oc_chat",
+		ChatType:  "group",
+		MessageID: "om_1",
+		RawText:   "hello there",
+	})
+	if err != nil {
+		t.Fatalf("HandleIncomingMessage error: %v", err)
+	}
+	if len(sender.messages) != 1 {
+		t.Fatalf("expected one fallback guidance message, got %d", len(sender.messages))
+	}
+	if !strings.Contains(sender.messages[0].Text, "not bound to a Codex thread") {
+		t.Fatalf("expected topic binding guidance message, got %q", sender.messages[0].Text)
+	}
+	if !strings.Contains(sender.messages[0].Text, "/help") {
+		t.Fatalf("expected fallback guidance to point user to /help, got %q", sender.messages[0].Text)
 	}
 }
 

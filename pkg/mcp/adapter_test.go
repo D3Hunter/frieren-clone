@@ -189,7 +189,8 @@ func TestGateway_CallTool_ReusesSessionForSessionScopedFollowupTools(t *testing.
 	}
 }
 
-func TestGateway_CallTool_RecreatesSessionAfterIdleTimeout(t *testing.T) {
+func TestGateway_CallTool_KeepsSessionAfterIdlePeriod(t *testing.T) {
+	eventStore := newCloseRecorderEventStore()
 	server := sdk.NewServer(&sdk.Implementation{Name: "test-server", Version: "1.0.0"}, nil)
 	var (
 		mu         sync.Mutex
@@ -206,11 +207,10 @@ func TestGateway_CallTool_RecreatesSessionAfterIdleTimeout(t *testing.T) {
 
 	httpServer := httptest.NewServer(sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server {
 		return server
-	}, nil))
+	}, &sdk.StreamableHTTPOptions{EventStore: eventStore}))
 	defer httpServer.Close()
 
 	gateway := NewGateway(httpServer.URL, 3*time.Second)
-	gateway.sessionIdleTimeout = 50 * time.Millisecond
 	defer func() {
 		if err := gateway.Close(); err != nil {
 			t.Fatalf("Close error: %v", err)
@@ -237,8 +237,11 @@ func TestGateway_CallTool_RecreatesSessionAfterIdleTimeout(t *testing.T) {
 	if sessionIDs[0] != sessionIDs[1] {
 		t.Fatalf("expected first two calls to share session, got %q and %q", sessionIDs[0], sessionIDs[1])
 	}
-	if sessionIDs[1] == sessionIDs[2] {
-		t.Fatalf("expected third call to use a new session after timeout, got %q", sessionIDs[2])
+	if sessionIDs[1] != sessionIDs[2] {
+		t.Fatalf("expected third call to keep the same session even after idle period, got %q then %q", sessionIDs[1], sessionIDs[2])
+	}
+	if got := eventStore.closed.Load(); got != 0 {
+		t.Fatalf("expected no automatic session close during idle period, got %d close events", got)
 	}
 }
 

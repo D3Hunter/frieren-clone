@@ -72,20 +72,13 @@ func runSimulationMode(cfg config.Config, logger *zap.Logger) error {
 	}
 
 	mcpGateway := service.MCPGateway(&simulationMCPGateway{logger: logger.Named("simulation.mcp")})
-	closeMCPGateway := func() error { return nil }
 	if simulationUseRealMCP() {
 		realGateway := mcp.NewGateway(cfg.MCP.Endpoint, time.Duration(cfg.MCP.TimeoutSec)*time.Second)
 		mcpGateway = mcpGatewayAdapter{gateway: realGateway}
-		closeMCPGateway = realGateway.Close
 		logger.Info("simulation configured to use real mcp gateway", zap.String("endpoint", cfg.MCP.Endpoint))
 	} else {
 		logger.Info("simulation configured to use mocked mcp gateway")
 	}
-	defer func() {
-		if err := closeMCPGateway(); err != nil {
-			logger.Warn("close simulation mcp gateway failed", zap.Error(err))
-		}
-	}()
 
 	messageAPI := &simulationMessageAPI{logger: logger.Named("simulation.sender")}
 	reactionAPI := &simulationReactionAPI{logger: logger.Named("simulation.reaction")}
