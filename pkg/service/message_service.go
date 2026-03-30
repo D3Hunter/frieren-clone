@@ -130,18 +130,21 @@ const (
 	mcpCodexTopicAlias            = "__mcp_codex__"
 	renderModePlainText           = "plain_text"
 	renderModeCodexMarkdown       = "codex_markdown"
-	defaultHelpMessage            = "Available commands:\n/help\n/mcp tools\n/mcp schema <tool>\n/mcp call <tool> <json>\n/<project> <prompt>\n\nNote: /mcp call codex always starts a new Codex thread."
-	codexPromptHelpMessage        = `Usage: /mcp call codex {"prompt":"<your prompt>"}`
+	emptyCommandHelpMessage       = "I couldn't find a command in your message.\nSend `/help` to see command examples."
+	plainTextNoBindingHelpMessage = "This topic is not bound to a Codex thread yet.\nStart with a slash command, or send `/help` for examples."
+	mcpSchemaUsageHelpMessage     = "Please specify a tool name.\nUsage: `/mcp schema <tool>`"
+	mcpCallUsageHelpMessage       = "Please provide both tool name and JSON arguments.\nUsage: `/mcp call <tool> <json>`"
+	codexPromptHelpMessage        = "Please provide a non-empty `prompt` for `codex`.\nExample: `/mcp call codex {\"prompt\":\"check status\"}`"
+	noBoundTopicThreadHelpMessage = "This topic is not bound to a Codex thread yet.\nStart with a new slash command first, for example: `/<project> <prompt>`."
+	unknownProjectHelpTemplate    = "I don't recognize project alias `%s`.\nUse `/help` to see available command formats."
 	defaultCodexModel             = "gpt-5.3-codex"
 	defaultCodexReasoningEffort   = "xhigh"
 	defaultCodexSandbox           = "danger-full-access"
 	defaultCodexApprovalPolicy    = "never"
 	// Intentionally keep /mcp call codex as "start new thread" so users can open
 	// multiple independent Codex threads inside one Feishu topic when needed.
-	codexNewThreadNotice     = "Note: by design, /mcp call codex always starts a new Codex thread and does not reuse the current topic binding."
-	groupMentionHelpMessage  = "In group chats, mention the bot before slash commands, for example: @bot /help"
-	unknownProjectHelpPrefix = "Unknown project alias"
-	codexSessionTimeout      = time.Hour
+	codexNewThreadNotice    = "Note: `/mcp call codex` always starts a new Codex thread and does not reuse the current topic binding."
+	groupMentionHelpMessage = "In group chats, mention the bot before slash commands.\nExample: `@bot /help`"
 )
 
 // NewCommandService builds CommandService with normalized config and safe logger defaults.
@@ -194,7 +197,7 @@ func (s *CommandService) HandleIncomingMessage(ctx context.Context, msg Incoming
 	msgLogger.Info("incoming feishu message", zap.String("raw_text", text))
 	if text == "" {
 		msgLogger.Info("incoming message has empty text")
-		_, err := s.send(ctx, msg, "Please enter a command. Use /help for usage.", renderModePlainText)
+		_, err := s.send(ctx, msg, emptyCommandHelpMessage, renderModePlainText)
 		return err
 	}
 	cleanText := stripMentions(text)
@@ -229,7 +232,7 @@ func (s *CommandService) HandleIncomingMessage(ctx context.Context, msg Incoming
 	}
 
 	msgLogger.Info("plain text without topic binding; returning help")
-	_, err := s.send(ctx, msg, "Use /help to see command syntax.", renderModePlainText)
+	_, err := s.send(ctx, msg, plainTextNoBindingHelpMessage, renderModePlainText)
 	return err
 }
 
@@ -257,21 +260,21 @@ func (s *CommandService) handleSlashCommand(ctx context.Context, msg IncomingMes
 	msgLogger.Info("handling slash command", zap.String("command_text", cleanText))
 	switch {
 	case cleanText == "/help":
-		_, err := s.send(ctx, msg, defaultHelpMessage, renderModePlainText)
+		_, err := s.send(ctx, msg, s.helpMessage(), renderModePlainText)
 		return err
 	case cleanText == "/mcp tools":
 		return s.handleMCPTools(ctx, msg)
 	case strings.HasPrefix(cleanText, "/mcp schema "):
 		tool := strings.TrimSpace(strings.TrimPrefix(cleanText, "/mcp schema "))
 		if tool == "" {
-			_, err := s.send(ctx, msg, "Usage: /mcp schema <tool>", renderModePlainText)
+			_, err := s.send(ctx, msg, mcpSchemaUsageHelpMessage, renderModePlainText)
 			return err
 		}
 		return s.handleMCPSchema(ctx, msg, tool)
 	case strings.HasPrefix(cleanText, "/mcp call "):
 		tool, argsRaw, ok := parseMCPCallCommand(cleanText)
 		if !ok {
-			_, err := s.send(ctx, msg, "Usage: /mcp call <tool> <json>", renderModePlainText)
+			_, err := s.send(ctx, msg, mcpCallUsageHelpMessage, renderModePlainText)
 			return err
 		}
 		var args map[string]any
@@ -293,7 +296,7 @@ func (s *CommandService) handleSlashCommand(ctx context.Context, msg IncomingMes
 	default:
 		alias, prompt, ok := parseProjectCommand(cleanText)
 		if !ok {
-			_, err := s.send(ctx, msg, defaultHelpMessage, renderModePlainText)
+			_, err := s.send(ctx, msg, s.helpMessage(), renderModePlainText)
 			return err
 		}
 		msgLogger.Info(
@@ -303,7 +306,7 @@ func (s *CommandService) handleSlashCommand(ctx context.Context, msg IncomingMes
 		)
 		cwd, ok := s.cfg.ProjectAliasCWD[alias]
 		if !ok || strings.TrimSpace(cwd) == "" {
-			_, err := s.send(ctx, msg, fmt.Sprintf("%s: %s", unknownProjectHelpPrefix, alias), renderModePlainText)
+			_, err := s.send(ctx, msg, fmt.Sprintf(unknownProjectHelpTemplate, alias), renderModePlainText)
 			return err
 		}
 		outcome, err := s.executeWithHeartbeat(ctx, msg, func(runCtx context.Context) (commandOutcome, error) {
@@ -445,7 +448,7 @@ func (s *CommandService) handleTopicFollowup(ctx context.Context, msg IncomingMe
 	msgLogger := s.messageLogger(msg)
 	threadID := strings.TrimSpace(binding.CodexThreadID)
 	if threadID == "" {
-		_, err := s.send(ctx, msg, "No Codex thread is bound to this topic yet. Send a new slash command first.", renderModePlainText)
+		_, err := s.send(ctx, msg, noBoundTopicThreadHelpMessage, renderModePlainText)
 		return err
 	}
 	outcome, err := s.executeWithHeartbeat(ctx, msg, func(runCtx context.Context) (commandOutcome, error) {
@@ -763,6 +766,44 @@ func normalizeOutput(output string) string {
 		return "Completed."
 	}
 	return output
+}
+
+func (s *CommandService) helpMessage() string {
+	lines := []string{
+		"### Command guide",
+		"",
+		"Use one of the commands below:",
+		"",
+		"- `/help`: Show this guide.",
+		"- `/mcp tools`: List available MCP tools.",
+		"- `/mcp schema <tool>`: Show a tool's input schema.",
+		"- `/mcp call <tool> <json>`: Call a tool with JSON arguments.",
+		"- `/<project> <prompt>`: Run Codex in the project mapped to `<project>`.",
+		"",
+		"### Available projects",
+		"",
+	}
+
+	aliases := make([]string, 0, len(s.cfg.ProjectAliasCWD))
+	for alias, cwd := range s.cfg.ProjectAliasCWD {
+		alias = strings.TrimSpace(alias)
+		if alias == "" || strings.TrimSpace(cwd) == "" {
+			continue
+		}
+		aliases = append(aliases, alias)
+	}
+	sort.Strings(aliases)
+
+	if len(aliases) == 0 {
+		lines = append(lines, "- _No projects configured_.")
+	} else {
+		for _, alias := range aliases {
+			lines = append(lines, fmt.Sprintf("- `%s`", alias))
+		}
+	}
+
+	lines = append(lines, "", "Tip: `/mcp call codex` always starts a new Codex thread.")
+	return strings.Join(lines, "\n")
 }
 
 func formatCodexOutput(output, codexThreadID, tokenUsage string, notices ...string) string {
@@ -1337,8 +1378,7 @@ func (s *CommandService) formatSessionResetNotice(msg IncomingMessage, binding T
 		feishuTopicID = "(empty)"
 	}
 	return fmt.Sprintf(
-		"Detected expired Codex session (automatically closed after %s). Starting a new session from this message and no longer reusing previous session context.\nEnvironment:\n- project_alias: %s\n- previous_codex_thread_id: %s\n- cwd: %s\n- feishu_topic_id: %s\n- chat_id: %s",
-		formatElapsedDuration(codexSessionTimeout),
+		"Detected unavailable Codex session for the current topic binding. Starting a new session from this message and no longer reusing previous session context.\nEnvironment:\n- project_alias: %s\n- previous_codex_thread_id: %s\n- cwd: %s\n- feishu_topic_id: %s\n- chat_id: %s",
 		projectAlias,
 		previousThreadID,
 		cwd,
@@ -1504,11 +1544,7 @@ func outgoingMessageLogFields(msg IncomingMessage, text, renderMode string) []za
 }
 
 func normalizeRenderMode(renderMode string) string {
-	renderMode = strings.TrimSpace(strings.ToLower(renderMode))
-	if renderMode == renderModeCodexMarkdown {
-		return renderModeCodexMarkdown
-	}
-	return renderModePlainText
+	return renderModeCodexMarkdown
 }
 
 func (s *CommandService) logCommandExecutionResult(msg IncomingMessage, startedAt time.Time, outcome commandOutcome, err error) {

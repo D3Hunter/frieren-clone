@@ -21,7 +21,6 @@ type ToolInfo struct {
 type Gateway struct {
 	endpoint           string
 	timeout            time.Duration
-	sessionIdleTimeout time.Duration
 	mu                 sync.Mutex
 	session            *sdk.ClientSession
 	sessionLastUsedAt  time.Time
@@ -30,9 +29,8 @@ type Gateway struct {
 // NewGateway builds a Gateway for the given streamable MCP endpoint and call timeout.
 func NewGateway(endpoint string, timeout time.Duration) *Gateway {
 	return &Gateway{
-		endpoint:           strings.TrimSpace(endpoint),
-		timeout:            timeout,
-		sessionIdleTimeout: time.Hour,
+		endpoint: strings.TrimSpace(endpoint),
+		timeout:  timeout,
 	}
 }
 
@@ -152,9 +150,6 @@ func (g *Gateway) withSessionWithTimeout(ctx context.Context, timeout time.Durat
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	if err := g.closeExpiredSessionLocked(time.Now()); err != nil {
-		return err
-	}
 	session, err := g.ensureSessionLocked(callCtx)
 	if err != nil {
 		return err
@@ -210,26 +205,6 @@ func (g *Gateway) closeSessionLocked() error {
 	g.session = nil
 	g.sessionLastUsedAt = time.Time{}
 	return err
-}
-
-func (g *Gateway) closeExpiredSessionLocked(now time.Time) error {
-	if g.session == nil {
-		return nil
-	}
-	if g.sessionIdleTimeout <= 0 {
-		return nil
-	}
-	lastUsedAt := g.sessionLastUsedAt
-	if lastUsedAt.IsZero() {
-		return nil
-	}
-	if now.Sub(lastUsedAt) < g.sessionIdleTimeout {
-		return nil
-	}
-	if err := g.closeSessionLocked(); err != nil {
-		return fmt.Errorf("close expired mcp session: %w", err)
-	}
-	return nil
 }
 
 func (g *Gateway) timeoutForTool(tool string) time.Duration {

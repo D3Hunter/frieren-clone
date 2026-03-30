@@ -34,9 +34,9 @@ Behavior notes:
 - Rationale: this is intentional so one Feishu topic can host multiple independent Codex threads when users want parallel or reset investigations.
 - Any slash command that starts Codex execution (`/mcp call codex`, `/<project> <prompt>`) always creates a new thread and resets the topic binding to that latest thread.
 - Plain-text follow-up messages in the same topic always continue the latest bound Codex thread.
-- `/help` includes a one-line reminder of this `/mcp call codex` new-thread behavior.
+- `/help` returns a human-readable command guide with command descriptions, lists configured project aliases from `projects.<alias>.cwd`, and includes a reminder of this `/mcp call codex` new-thread behavior.
 - Unknown commands fall back to concise help.
-- Unknown project alias returns `Unknown project alias: <alias>`.
+- Unknown project alias returns a friendly guidance message that includes the alias and points users to `/help`.
 
 ## 3) Trigger and routing rules
 
@@ -49,7 +49,7 @@ In group/topic-group chats, **slash commands require mention**:
 - Only messages that are both slash commands and include bot mention are treated as new commands.
 - Mention identity is checked via incoming mention open_id list against `commands.bot_open_id`.
 
-If a group slash command lacks mention, bot returns usage reminder.
+If a group slash command lacks mention, bot returns a friendly reminder plus an example mention command.
 
 ### Topic follow-up rule
 
@@ -62,7 +62,7 @@ If a message is plain text (not slash) and belongs to a topic with existing bind
 
 ### Outside bound topic context
 
-Plain text outside bound topic context does not use legacy echo behavior; it returns concise help.
+Plain text outside bound topic context does not use legacy echo behavior; it returns friendly guidance to start with a slash command or open `/help`.
 
 ## 4) Architecture and data flow
 
@@ -81,15 +81,16 @@ Plain text outside bound topic context does not use legacy echo behavior; it ret
 
 3. `pkg/sender/text_sender.go`
    - replies to incoming message via Feishu reply API (`reply_in_thread=true`),
-   - uses `text` message type to avoid extra post title formatting,
-   - chunks long outputs and prefixes ordering markers.
+   - sends Feishu interactive markdown payloads for normal delivery,
+   - falls back to plain `text` per chunk only when interactive delivery fails,
+   - chunks long outputs with markdown-aware ordering markers.
 
 4. `pkg/runtime/topic_state_store.go`
    - persists topic->thread binding JSON to disk,
    - reloads bindings at startup.
 
 5. `pkg/mcp/adapter.go`
-   - creates short-lived go-sdk session per MCP command,
+   - reuses one long-lived go-sdk session during process lifetime,
    - lists tools, resolves schema, executes call.
 
 6. `pkg/service/message_service.go`
@@ -134,9 +135,10 @@ Implementation: `pkg/mcp/adapter.go`.
 
 - SDK: `github.com/modelcontextprotocol/go-sdk v1.3.1` (compatible with Go 1.23.2 in this repo)
 - Transport: `mcp.StreamableClientTransport`
-- Session policy: **reuse one long-lived MCP session per bot process, close on shutdown**
+- Session policy: **reuse one long-lived MCP session per bot process**
   - Rationale: session-scoped tool pairs like `codex` + `codex-reply` rely on the same MCP session context across follow-up calls.
-  - Idle timeout: MCP session is rotated after 1 hour of inactivity to avoid keeping stale sessions indefinitely.
+  - Frieren does not auto-rotate sessions by idle timeout and does not explicitly close MCP sessions in normal runtime flows.
+  - If the underlying transport is already closed, gateway resets local session state and reconnects once on demand.
 - Operations:
   - `/mcp tools` -> `ListTools` (cursor loop)
   - `/mcp schema <tool>` -> list tools and print target `inputSchema`
@@ -183,7 +185,7 @@ When `codex-status` returns parseable context window usage, final footer include
 
 If `codex-status` is unavailable or its output is not parseable, reply still includes `codex_thread_id` footer and skips `context_window`.
 
-If follow-up `codex-reply` returns session-not-found (for example, after MCP session idle-timeout rotation):
+If follow-up `codex-reply` returns session-not-found (for example, when MCP-side session context is no longer available):
 
 - bot first posts a topic notice explaining this follow-up will run in a new Codex session,
 - notice includes environment snapshot (`project_alias`, previous `codex_thread_id`, `cwd`, topic id, chat id),
@@ -229,9 +231,8 @@ Implemented in `pkg/sender/text_sender.go` and service heartbeat flow.
 - All service responses are sent as replies to incoming message id.
 - Reply API uses `reply_in_thread=true` to keep same topic chain behavior.
 - Content mode selection:
-  - default render mode is plain text (`text` message type),
-  - Codex final outputs (`/<project> <prompt>`, `/mcp call codex ...`, topic follow-up via `codex-reply`) use `codex_markdown` render mode,
-  - `/help`, `/mcp tools`, `/mcp schema`, heartbeat, session-reset notice, and failure/system messages stay plain text mode.
+  - all responses use `codex_markdown` render mode (interactive markdown conversion path),
+  - sender still retries as plain `text` per chunk when interactive markdown send fails.
 - Codex markdown translation pipeline:
   - parses Codex CommonMark/GFM output with Goldmark + GFM extensions,
   - renders normalized Feishu-friendly markdown from AST,
@@ -249,14 +250,10 @@ Implemented in `pkg/sender/text_sender.go` and service heartbeat flow.
   - includes `codex_thread_id`,
   - includes `context_window` token usage line when `codex-status` succeeds and usage can be parsed.
 - Long output splitting:
-  - plain text mode chunks at 1800 runes,
-  - codex markdown mode uses a lower safety cap (currently 1380 runes before prefixing) to reduce Feishu interactive markdown send failures on larger chunks,
-  - plain mode keeps rune/line-aware chunking,
-  - Codex markdown mode uses markdown-aware block chunking to avoid splitting fenced code/table/list blocks when possible,
-  - Codex markdown mode keeps section headings attached to their following content block (for example table/list/code) when possible to improve per-chunk rendering stability,
-  - each chunk keeps ordering marker (`[i/n]`):
-    - plain text mode prefixes each chunk (`[i/n] ...`),
-    - codex markdown mode appends the marker as a suffix so leading markdown structures (for example headings) still render correctly.
+  - markdown conversion path uses a safety cap (currently 1380 runes before suffix markers) to reduce Feishu interactive markdown send failures on larger chunks,
+  - markdown-aware block chunking avoids splitting fenced code/table/list blocks when possible,
+  - section headings are kept attached to their following content block (for example table/list/code) when possible to improve per-chunk rendering stability,
+  - each chunk keeps ordering marker (`[i/n]`) as a suffix so leading markdown structures (for example headings) still render correctly.
 - Card send fallback:
   - if sending one Codex markdown chunk as interactive card fails, sender retries that chunk once as plain `text`.
 - Processing feedback:

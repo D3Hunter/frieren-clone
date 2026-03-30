@@ -97,7 +97,7 @@ func TestSend_ReplyInThreadForTopicMessages(t *testing.T) {
 	}
 }
 
-func TestSend_UsesTextForShortPlainText(t *testing.T) {
+func TestSend_DefaultModeUsesInteractiveForShortText(t *testing.T) {
 	api := &fakeMessageAPI{}
 	s := NewTextSender(api, &fakeReactionAPI{})
 
@@ -108,8 +108,8 @@ func TestSend_UsesTextForShortPlainText(t *testing.T) {
 	if len(api.replyReqs) != 1 {
 		t.Fatalf("expected one reply request, got %d", len(api.replyReqs))
 	}
-	if api.replyReqs[0].Body.MsgType == nil || *api.replyReqs[0].Body.MsgType != "text" {
-		t.Fatalf("expected text msg type, got %+v", api.replyReqs[0].Body.MsgType)
+	if api.replyReqs[0].Body.MsgType == nil || *api.replyReqs[0].Body.MsgType != "interactive" {
+		t.Fatalf("expected interactive msg type, got %+v", api.replyReqs[0].Body.MsgType)
 	}
 }
 
@@ -172,7 +172,7 @@ func TestBuildContent_InteractivePreservesMarkdownListMarkers(t *testing.T) {
 	}
 }
 
-func TestSend_DefaultModeKeepsMarkdownAsPlainText(t *testing.T) {
+func TestSend_DefaultModeUsesInteractiveForMarkdownInput(t *testing.T) {
 	api := &fakeMessageAPI{}
 	s := NewTextSender(api, &fakeReactionAPI{})
 
@@ -187,8 +187,8 @@ func TestSend_DefaultModeKeepsMarkdownAsPlainText(t *testing.T) {
 	if len(api.replyReqs) != 1 {
 		t.Fatalf("expected one reply request, got %d", len(api.replyReqs))
 	}
-	if api.replyReqs[0].Body.MsgType == nil || *api.replyReqs[0].Body.MsgType != "text" {
-		t.Fatalf("expected text msg type, got %+v", api.replyReqs[0].Body.MsgType)
+	if api.replyReqs[0].Body.MsgType == nil || *api.replyReqs[0].Body.MsgType != "interactive" {
+		t.Fatalf("expected interactive msg type, got %+v", api.replyReqs[0].Body.MsgType)
 	}
 }
 
@@ -210,12 +210,31 @@ func TestSend_SplitsLongOutputIntoOrderedChunks(t *testing.T) {
 		if req.Body == nil || req.Body.Content == nil {
 			t.Fatalf("chunk %d missing content", i)
 		}
-		var content map[string]string
-		if err := json.Unmarshal([]byte(*req.Body.Content), &content); err != nil {
+		if req.Body.MsgType == nil || *req.Body.MsgType != "interactive" {
+			t.Fatalf("chunk %d expected interactive msg type, got %+v", i, req.Body.MsgType)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(*req.Body.Content), &payload); err != nil {
 			t.Fatalf("chunk %d invalid json content: %v", i, err)
 		}
-		if !strings.Contains(content["text"], "[") {
-			t.Fatalf("chunk %d missing ordering prefix: %q", i, content["text"])
+		body, ok := payload["body"].(map[string]any)
+		if !ok {
+			t.Fatalf("chunk %d expected card body object, got %#v", i, payload["body"])
+		}
+		elements, ok := body["elements"].([]any)
+		if !ok || len(elements) == 0 {
+			t.Fatalf("chunk %d expected markdown body elements, got %#v", i, body["elements"])
+		}
+		first, ok := elements[0].(map[string]any)
+		if !ok {
+			t.Fatalf("chunk %d expected first element object, got %#v", i, elements[0])
+		}
+		content, ok := first["content"].(string)
+		if !ok {
+			t.Fatalf("chunk %d expected markdown content string, got %#v", i, first["content"])
+		}
+		if !strings.Contains(content, "[") {
+			t.Fatalf("chunk %d missing ordering marker: %q", i, content)
 		}
 	}
 }
